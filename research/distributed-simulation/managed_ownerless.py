@@ -14,10 +14,12 @@ import time
 from pathlib import Path
 
 from combined_ownerless_lab import (CertifiedClientGate, FALSE_FLAGS, FULL, _restoration_status,
-                                    combined_authority, committed_snapshot, sha)
+                                    _restore_reference_staging, combined_authority, committed_snapshot,
+                                    restoration_source_pin, sha)
 from ownerless_permission import parts
 from recovery_runtime import RecoveryAuthority
 from region_runtime import Rejected, canonical, digest, fields, integer, require
+from transition_runtime import checked_command
 from worker_placement import (MAX_SAMPLE_AGE_NS, Offer, Sample, assess, evaluate, region_load)
 
 
@@ -40,6 +42,9 @@ def managed_authority(quorum, slot_subjects):
 
     class Managed(Combined, RecoveryAuthority):
         app_id = 0x53433639
+        # Research-only schema. Refuse v1 rather than manufacture
+        # authorization provenance for previously queued commands.
+        schema = 2
         ruleset = "swarmcraft-reference-managed-ownerless/v1/"+binding
 
         @classmethod
@@ -50,6 +55,11 @@ def managed_authority(quorum, slot_subjects):
             db.execute("""CREATE TABLE managed_scopes(scope INTEGER PRIMARY KEY, owner TEXT NOT NULL,
                         base BLOB NOT NULL, offers BLOB NOT NULL, proofs BLOB NOT NULL,
                         samples BLOB, staged BLOB, released INTEGER NOT NULL CHECK(released IN (0,1)))""")
+            db.execute("""CREATE TABLE command_authorizations(request_id TEXT PRIMARY KEY,
+                        player INTEGER NOT NULL, request_hash TEXT NOT NULL,
+                        sequence INTEGER NOT NULL, head TEXT NOT NULL, player_key TEXT NOT NULL)""")
+            db.execute("""CREATE TABLE managed_restores(generation INTEGER PRIMARY KEY, record BLOB NOT NULL)""")
+            db.execute("""CREATE TABLE abandoned_commands(request_id TEXT PRIMARY KEY, generation INTEGER NOT NULL)""")
 
         def __init__(self,path,*,read_only=False):
             self._owner = secrets.token_hex(32)
@@ -62,6 +72,7 @@ def managed_authority(quorum, slot_subjects):
                     state = self._contribution(self._read())
                     if state["scope"]:
                         self._scope_record(state)
+                    self._audit_authorizations()
             except BaseException:
                 self.close()
                 raise
@@ -103,10 +114,107 @@ def managed_authority(quorum, slot_subjects):
             require(len(verifiers)==1,"managed verifier not current")
             _restoration_status(quorum,head,verifiers[0])
 
+        def _audit_authorizations(self):
+            rows = self.db.execute("""SELECT c.player,c.request,c.request_id,a.player,a.request_hash,
+                a.sequence,a.head,a.player_key FROM commands c
+                LEFT JOIN command_authorizations a ON a.request_id=c.request_id
+                ORDER BY c.tick,c.player""").fetchall()
+            require(len(rows)==self.db.execute("SELECT COUNT(*) FROM command_authorizations").fetchone()[0],
+                    "orphaned managed command authorization")
+            for player,raw,request_id,subject,request_hash,sequence,head,key in rows:
+                require(player in (0,1) and player==subject and json.loads(raw)["id"]==request_id
+                        and request_hash==sha(raw) and integer(sequence,1,128) and digest(head)
+                        and key==quorum.mapping[player],"missing or invalid managed command authorization")
+            for request_id,generation in self.db.execute("SELECT request_id,generation FROM abandoned_commands"):
+                require(digest(request_id) and self.db.execute("SELECT 1 FROM managed_restores WHERE generation=?",
+                            (generation,)).fetchone() is not None
+                        and self.db.execute("SELECT 1 FROM commands WHERE request_id=?",(request_id,)).fetchone() is None,
+                        "invalid abandoned managed command")
+
+        def _invitation_history(self):
+            """Use the actual local Rust-verified history, not a cached role report."""
+            head = dict(quorum.head)
+            self._head_check(head)
+            history = quorum.auth(1,"export-history","--expected-world",quorum.world)
+            with tempfile.TemporaryDirectory(prefix="sc68-managed-invites-") as tmp:
+                path = Path(tmp)/"history.json"
+                path.write_bytes(canonical(history))
+                require(quorum.inspect(path)==head,"managed invitation history pin changed")
+            self._head_check(head)
+            records = history["records"]
+            require(len(records)==head["sequence"]<=128,"invalid managed invitation history")
+            # A next signed proposal commits its predecessor's hash. The
+            # last hash comes from the independently verified head.
+            hashes = [bytes(row["proposal"]["parent"]).hex() for row in records]+[head["head"]]
+            return head,records,hashes
+
+        def _invited_at(self,records,key,sequence):
+            invited = False
+            for row in records[:sequence]:
+                action = row["proposal"]["action"]
+                role = action.get("set_player") if isinstance(action,dict) else None
+                if role is not None and bytes(role["player"]["public_key"]).hex()==key:
+                    invited = role["allowed"]
+            return invited
+
+        def _authorized_command(self,player,request,history,*,new=False,committed=False):
+            head,records,hashes = history
+            key = quorum.mapping[player]
+            require(self._invited_at(records,key,head["sequence"]),"managed player has no current private invitation")
+            raw = canonical(request)
+            stored = self.db.execute("""SELECT player,request_hash,sequence,head,player_key
+                FROM command_authorizations WHERE request_id=?""",(request["id"],)).fetchone()
+            if new:
+                require(stored is None,"orphaned managed command authorization")
+                self.db.execute("INSERT INTO command_authorizations VALUES(?,?,?,?,?,?)",
+                                (request["id"],player,sha(raw),head["sequence"],head["head"],key))
+                return
+            require(stored is not None,"missing managed command authorization")
+            subject,request_hash,sequence,anchor,stored_key = stored
+            require(subject==player and request_hash==sha(raw) and stored_key==key
+                    and integer(sequence,1,head["sequence"]) and hashes[sequence]==anchor
+                    and self._invited_at(records,key,sequence),"managed command invitation anchor differs")
+            if not committed:
+                # Re-invitation must not resurrect an old sealed command.
+                # A revoked pending command requires explicit abandonment
+                # into a separate certified restoration, not an in-place edit.
+                for row in records[sequence:]:
+                    action = row["proposal"]["action"]
+                    role = action.get("set_player") if isinstance(action,dict) else None
+                    require(not (role is not None and role["allowed"] is False
+                                 and bytes(role["player"]["public_key"]).hex()==key),
+                            "managed command invitation was revoked after queueing")
+
+        def _submit_locked(self,current,player,request,*,pending_only=False):
+            # Validate the canonical command/duplicate semantics first;
+            # both the queue and its authorization row share the same txn.
+            checked_command(player,request,current["world"],current["players"])
+            require(self.db.execute("SELECT 1 FROM abandoned_commands WHERE request_id=?",
+                                   (request["id"],)).fetchone() is None,"abandoned managed command ID")
+            existing = self.db.execute("SELECT response FROM commands WHERE request_id=?",
+                                       (request["id"],)).fetchone()
+            result = super()._submit_locked(current,player,request,pending_only=pending_only)
+            history = self._invitation_history()
+            require(quorum.state_hash(quorum.checkpoint)==history[0]["checkpoint"]
+                    and quorum.checkpoint.read_bytes()==canonical(committed_snapshot(self,quorum.mapping,current)),
+                    "managed command base is not the certified checkpoint")
+            self._authorized_command(player,request,history,
+                                     new=existing is None,committed=result["op"]=="committed")
+            return result
+
+        def _check_pending(self,current,commands=None):
+            if commands is None:
+                commands,_ = self._commands(current,current["tick"]+1,current["cut_root"])
+            if commands:
+                history = self._invitation_history()
+                for player,(request,_) in commands.items():
+                    self._authorized_command(player,request,history)
+
         def _before_probe(self,current,state,slots):
             require(current["tick"]<999999 and current["players"]==[0,1],"invalid managed tick or roster")
             head = dict(quorum.head)
             self._head_check(head)
+            self._check_pending(current)
             checkpoint = canonical(committed_snapshot(self,quorum.mapping,current))
             with tempfile.TemporaryDirectory(prefix="sc68-managed-base-") as tmp:
                 path = Path(tmp)/"accepted.bin"
@@ -234,10 +342,18 @@ def managed_authority(quorum, slot_subjects):
             record = self._active_record(current,state)
             self._check_resources(current,state,record,current["state"])
 
+        def _before_sealed_inputs(self,current,commands):
+            state = self._running(current)
+            try:
+                self._check_pending(current,commands)
+            except Exception as error:
+                raise ScopeFault(str(error),state["scope"],current["generation"]) from error
+
         def _record_candidate(self,current,state,candidate,cut):
             lifecycle = self._running(current)
             record = self._active_record(current,lifecycle)
             self._check_resources(current,lifecycle,record,state)
+            self._before_sealed_inputs(current,self._commands(current,current["tick"]+1,current["cut_root"])[0])
             super()._record_candidate(current,state,candidate,cut)
             # Staged receipt and one-tick fence commit in the same FULL
             # transaction. Nothing can seal or commit a second tick.
@@ -267,9 +383,87 @@ def managed_authority(quorum, slot_subjects):
                             "cut":current["cut_root"],"generation":current["generation"]},
                         "managed staged cut differs")
                 self._head_check(record["base"]["head"])
+                # The staged commands are not yet certified, even though
+                # local SQLite has written their responses.
+                parent = self.db.execute("SELECT cut_root FROM commits WHERE tick=?",(current["tick"]-1,)).fetchone()[0]
+                commands,_ = self._commands(current,current["tick"],parent)
+                self._check_pending(current,commands)
                 return committed_snapshot(self,quorum.mapping,current)
 
+        def _restoration_pin_locked(self,current):
+            state = self._contribution(current)
+            self._audit_authorizations()
+            # Bind the exact unaccepted journal and all consent metadata,
+            # not just the world tick: withdrawal and pending commands
+            # can change without advancing the simulation.
+            metadata = {}
+            for table,order in (("managed_config","singleton"),("contribution","singleton"),
+                                ("lifecycle","seq"),("managed_scopes","scope"),
+                                ("command_authorizations","request_id"),
+                                ("managed_restores","generation"),("abandoned_commands","request_id")):
+                metadata[table] = [[v.hex() if isinstance(v,bytes) else v for v in row]
+                                   for row in self.db.execute(f"SELECT * FROM {table} ORDER BY {order}")]
+            return {"source":restoration_source_pin(current),
+                    "phase":state["phase"],"scope":state["scope"],"offers":[asdict(o) for o in state["offers"]],
+                    "blocked":state["blocked"],"journal_sha256":sha(canonical(self._audit(current))),
+                    "metadata_sha256":sha(canonical(metadata))}
+
+        def restoration_pin(self):
+            with self.transaction():
+                return self._restoration_pin_locked(self._read())
+
     return Managed
+
+
+def restore_managed_staging(quorum,slot_subjects,source,destination,*,expected_pin,source_retired,
+                            before_publish=None):
+    """Explicit non-destructive abandonment of uncertified managed work.
+
+    Preserve current consent, failed-worker blocks, monotonic scope
+    IDs and all retired lifecycle records, even when a world cut rolls
+    back. Previously abandoned command IDs are permanently tombstoned
+    in this local lineage. Never transfer a live scope or claim.
+    """
+    fields(expected_pin,"source","phase","scope","offers","blocked","journal_sha256","metadata_sha256")
+    require(expected_pin["phase"]=="paused","managed restoration requires released scope")
+    Authority = managed_authority(quorum,slot_subjects)
+
+    def copy_extra(original,current,restored,tick,generation,head):
+        pin = original._restoration_pin_locked(current)
+        require(canonical(pin)==canonical(expected_pin),"managed restoration consent or journal pin changed")
+        state = original._contribution(current)
+        require(state["phase"]=="paused" and not state["probes"] and not state["assignment"]
+                and original.db.execute("SELECT COUNT(*) FROM managed_scopes WHERE released<>1").fetchone()[0]==0,
+                "managed restoration requires released scope")
+        require(original.db.execute("SELECT COALESCE(MAX(scope),0),COUNT(*) FROM managed_scopes").fetchone()
+                ==(state["scope"],state["scope"]),"managed scope history incomplete")
+        # Keep complete historical lifecycle and scope evidence. An
+        # abandoned stage remains historical evidence, never an active
+        # authorization; the new quarantine consumes a higher generation.
+        restored.db.execute("DELETE FROM contribution")
+        for table,order,arity in (("contribution","singleton",7),("lifecycle","seq",2),
+                                  ("managed_scopes","scope",8),("managed_restores","generation",2),
+                                  ("abandoned_commands","request_id",2)):
+            rows = original.db.execute(f"SELECT * FROM {table} ORDER BY {order}").fetchall()
+            restored.db.executemany(f"INSERT INTO {table} VALUES("+",".join("?" for _ in range(arity))+")",rows)
+        retained = original.db.execute("""SELECT a.* FROM command_authorizations a
+                    JOIN commands c ON c.request_id=a.request_id WHERE c.tick<=? ORDER BY c.tick,c.player""",(tick,)).fetchall()
+        restored.db.executemany("INSERT INTO command_authorizations VALUES(?,?,?,?,?,?)",retained)
+        abandoned = [row[0] for row in original.db.execute("SELECT request_id FROM commands WHERE tick>? ORDER BY tick,player",(tick,))]
+        record = {"source_pin":pin,"accepted_head":head["head"],"restored_tick":tick,
+                  "quarantine_generation":generation,"abandoned_request_ids":abandoned}
+        restored.db.execute("INSERT INTO managed_restores VALUES(?,?)",(generation,canonical(record)))
+        restored.db.executemany("INSERT INTO abandoned_commands VALUES(?,?)",[(i,generation) for i in abandoned])
+        current_restored = restored._read()
+        restored._write(current_restored,state,"certified_restore_quarantine")
+        restored._audit_authorizations()
+        require(restored._contribution(current_restored)==state,"managed restoration changed current consent")
+        return {"managed_consent_preserved":True,"scope_sequence":state["scope"],
+                "abandoned_request_ids":abandoned,"fresh_measured_admission_required":True}
+
+    return _restore_reference_staging(quorum,source,destination,expected_source=expected_pin["source"],
+            source_retired=source_retired,before_publish=before_publish,Authority=Authority,
+            restore_extra=copy_extra,allow_pending=True)
 
 
 def certify_managed_checkpoint(ledger,quorum,gate,label,*,before_sync=None):

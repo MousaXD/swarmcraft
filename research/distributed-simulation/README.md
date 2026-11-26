@@ -179,6 +179,19 @@ restart with a preserved pending command, and a fresh single-worker
 certified recovery. No cross-store atomic lease, actual game
 admission, or managed-schema checkpoint restore is claimed.
 
+The managed-schema-v2 follow-up binds queued commands to their
+original verified private invitation history, refuses a revoked
+sealed command even after re-invitation, and permits explicit
+non-destructive restoration of a certified prefix or abandonment of
+an unaccepted input. Restoration retains the current consent
+revisions, blocked workers and retired scope history, tombstones
+discarded command IDs and requires fresh measured admission above
+the quarantine generation. Actual TCP/cgroup evidence demonstrates
+prior receipt recovery and a different certified replacement tick
+with the source unchanged. Version-1 managed databases are refused
+rather than assigned invented authorization records; the trusted
+reference controller still supplies identities and cleanup proof.
+
 ## Original R0 evidence (2026-11-08)
 
 

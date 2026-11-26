@@ -268,6 +268,14 @@ def restore_certified_staging(quorum, source, destination, *, expected_source, s
     The original must remain retired; process ownership is not proven by
     a Boolean. A new placement/role check and rotation are required.
     """
+    return _restore_reference_staging(quorum,source,destination,expected_source=expected_source,
+        source_retired=source_retired,before_publish=before_publish,
+        Authority=combined_authority(quorum.binding))
+
+
+def _restore_reference_staging(quorum, source, destination, *, expected_source, source_retired,
+                               before_publish, Authority, restore_extra=None, allow_pending=False):
+    """Internal shared no-clobber restore engine. Schema adapters are explicit."""
     require(source_retired is True,"source runtime must be explicitly retired")
     fields(expected_source,*SOURCE_PIN)
     require(integer(expected_source["generation"],1,MAX_GENERATION-2)
@@ -292,7 +300,7 @@ def restore_certified_staging(quorum, source, destination, *, expected_source, s
     verifiers = [v["peer_id"] for v in head["validators"] if v["public_key"] == quorum.keys[1]]
     require(len(verifiers)==1,"restoration verifier not in pinned roster")
     verifier = verifiers[0]
-    Authority = combined_authority(quorum.binding)
+    extra_report = {}
     with tempfile.TemporaryDirectory(prefix=".sc68-restore-",dir=destination.parent) as temp:
         temp = Path(temp)
         checkpoint = temp/"certified.bin"
@@ -313,7 +321,10 @@ def restore_certified_staging(quorum, source, destination, *, expected_source, s
                 current = original._read()
                 require(restoration_source_pin(current)==expected_source,"restoration source pin changed")
                 genesis,state,tick,commits,epochs,batches,commands = _certified_prefix(original,current,raw,mapping)
-                require(tick < current["tick"],"source has not advanced beyond certified checkpoint")
+                pending = original.db.execute("SELECT COUNT(*) FROM commands WHERE tick>?",(current["tick"],)).fetchone()[0]
+                sealed = original.db.execute("SELECT COUNT(*) FROM batches WHERE tick>?",(current["tick"],)).fetchone()[0]
+                require(tick < current["tick"] or (allow_pending and (pending or sealed)),
+                        "source has not advanced beyond certified checkpoint")
                 generation = current["generation"]+1
                 accepted = commits[-1]
                 grants = new_grants(current["world"],generation,tick,accepted[2],[FULL])
@@ -338,6 +349,8 @@ def restore_certified_staging(quorum, source, destination, *, expected_source, s
                             tick=?,runtime_root=?,cut_root=?,state=?,grants=? WHERE singleton=1""",
                             (generation,accepted[1],tick,accepted[2],accepted[3],canonical(wire(state)),canonical(grants)))
                         restored._state_cache = None
+                        if restore_extra is not None:
+                            extra_report = restore_extra(original,current,restored,tick,generation,head)
                         require(canonical(committed_snapshot(restored,mapping,restored._read()))==raw,
                                 "restored staging differs from certified bytes")
                 finally:
@@ -367,7 +380,7 @@ def restore_certified_staging(quorum, source, destination, *, expected_source, s
             "quarantine_generation":generation,"discarded_ticks":current["tick"]-tick,
             "source_preserved":True,"rotation_required":True,"live_quorum_verified":False,
             "runtime_activation":False,"canonical_authority":False,"write_authority":False,
-            "player_admission":False,"worker_admission":False}
+            "player_admission":False,"worker_admission":False,**extra_report}
 
 
 class CertifiedClientGate:

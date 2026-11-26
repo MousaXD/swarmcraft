@@ -212,6 +212,10 @@ class TransitionAuthority(Authority):
     def _before_seal(self, current):
         pass
 
+    def _before_sealed_inputs(self, current, commands):
+        """Validate the exact queued batch, including fused new inputs."""
+        pass
+
     def seal_next(self, generation, tick, root, *, inputs=None):
         with self.transaction(write=True):
             cur = self._read()
@@ -226,6 +230,7 @@ class TransitionAuthority(Authority):
                     self._queue_batch(cur, inputs)
             commands, batch = self._commands(cur, tick + 1, cur["cut_root"])
             require(all(result is None for _, result in commands.values()), "pending result already committed")
+            self._before_sealed_inputs(cur, commands)
             existing = self.db.execute("SELECT parent,inputs,result FROM batches WHERE tick=?", (tick + 1,)).fetchone()
             if existing is None:
                 self.db.execute("INSERT INTO batches VALUES(?,?,?,NULL)",

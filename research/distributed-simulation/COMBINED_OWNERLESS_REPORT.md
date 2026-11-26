@@ -495,6 +495,139 @@ certification/reconciliation of a locally staged but uncertified
 managed cut and consent-preserving separate restore require further
 integration. No live authority or actual Minecraft gameplay is enabled.
 
+## Managed restoration and continuous player invitation
+
+The managed authority's research schema is now version 2. It refuses
+version-1 managed databases rather than fabricating provenance for
+already queued commands. Ordinary combined/transition database
+schemas and their retained evidence are unchanged. Each managed
+command transaction records the exact request hash, player slot,
+mapped key, and accepted invitation history sequence/head alongside
+the existing immutable request. The private reference player identity
+is still supplied by the trusted connection controller, not by a
+player-controlled request field. No actual Minecraft account or live
+permission is established.
+
+Queueing and the authorization row share one SQLite write
+transaction, including batched queue/seal. The queue must match the
+exact locally accepted checkpoint and current private invitation.
+The controller obtains the actual signed history from its current
+validator journal, independently inspects its exact head, and checks
+the pinned identity and absence of a pending vote before and after
+the read. Each pending command must have an authentic invitation
+at its original history anchor, remain eligible now, and have no
+intervening signed revocation. Re-inviting the identity cannot
+resurrect a previously queued command. Unrelated governance changes
+may preserve a command with uninterrupted eligibility. The probe
+boundary, exact sealed batch (after any fused queue), candidate commit
+and staged certification handoff check the applicable command
+authorization. The input journal remains intact on refusal; neither
+replacing a sealed input in place nor silently omitting a revoked
+command is allowed. Already certified historical receipts may still
+be read through a currently eligible reference session; a prior
+revocation does not undo a signed checkpoint.
+
+The new `restore_managed_staging` uses the same read-only, exact
+certified-prefix reconstruction and atomic no-clobber publication
+engine as the earlier combined restore. It requires a separate
+destination, explicit source retirement, fully released contribution
+scopes and a caller-reviewed `restoration_pin()` binding the source
+world/generation/tick/roots, current consent choices, blocked slots,
+scope sequence and digests of the complete command journal and
+managed metadata. It refuses a stale consent or journal pin even
+when the world tick is unchanged. The adapter allows explicit
+abandonment of an uncertified local advance *or* a pending/sealed
+input at the unchanged certified tick. The original is kept intact.
+
+The restored database retains the real certified-prefix commit
+and command authorization rows and public epoch provenance. Unlike
+rolling back resource consent with simulation state, it preserves
+the latest local offers and revisions, failed-worker blocks,
+monotonically increasing scope sequence, and complete retired scope
+and lifecycle records, including historical evidence of abandoned
+work. It appends a durable quarantine-restore record and event,
+tombstones all discarded command IDs, copies previous tombstones,
+and consumes a new quarantine generation above the source.
+Abandoned command IDs cannot be queued again, including after
+re-invitation. An active or incompletely cleaned scope cannot be
+copied. Reopening verifies the authorization-row correspondence
+and fixed worker mapping. A fresh measured admission, not a manual
+rotation, is required for the next runtime generation; old worker
+receipts and controller claims cannot be reused.
+
+### Actual isolated managed restore run
+
+[Retained evidence](evidence/2026-11-26-managed-certified-restore.json),
+SHA-256 `297c50abcd5939dcdd090485e93c71b9de134e9ed08e6340f9399982eec1182f`.
+
+| Stage | Scope | Generation | Tick | Client outcome |
+| --- | ---: | ---: | ---: | --- |
+| First certified execution | 1 | 2 | 1 | Committed receipt |
+| Uncertified local advance | 2 | 3 | 2 | No acknowledgment |
+| Separate managed restore | 2 | 4 (quarantine) | 1 | Prior exact receipt recovered |
+| New consent and measured admission | 3 | 5 | 2 | Different certified command |
+
+The actual disposable Linux scope run used three policy-bound TCP
+worker processes, three command clients and a fourth TCP receipt
+recovery session. The founder departed before the first runtime
+stage. After the abandoned local advance, the controller blocked the
+failed worker revision, changed a different slot's consent and
+certified player revocation followed by re-invitation. The staged
+certification handoff was refused. Restoring the exact tick-one
+checkpoint preserved the current blocked worker and newer consent
+revision, historical scopes and the first command's original
+authorization, rather than the discarded tick-two authorization.
+No worker was admitted until the blocked worker explicitly advanced
+its consent revision. The quarantined generation could not be
+claimed, old worker receipts and the discarded command ID were
+refused, and a different tick-two command was admitted and
+certified through the encrypted quorum path. A fresh eligible
+client recovered the original tick-one receipt over TCP.
+
+The independent verifier checked seven signed decisions, two
+Ed25519 durable sync receipts, three exact candidate replays,
+resource and cleanup observations, command authorization anchors,
+source and restored history, lifecycle continuity and the exact
+certified client receipts. Both source database SHA-256 observations
+matched, the departed founder remained untouched, all worker scopes
+exited and recorded artifact hashes matched. These observations
+are not proof of independent physical ownership or sustained
+service.
+
+Targeted real-CLI regressions also exercise revocation after sealing,
+refusal after re-invitation, explicit same-tick abandonment of a
+sealed command, stale consent/journal pin refusal, blocked revision
+preservation, corrupted authorization-row refusal and atomic
+rollback of a fused batch containing an uninvited player. The
+earlier general restore tests cover actual pre-publication process
+kill/no-clobber behavior in the shared engine. All 154 research regression tests passed, including the seven real-CLI managed lifecycle tests and the two new retained-evidence mutation/replay tests. Workflow-policy, release-version and diff checks passed locally. The earlier managed withdrawal/recovery experiment was also rerun against schema v2: [retained regression evidence](evidence/2026-11-26-managed-v2-contribution-regression.json), SHA-256 `f20a421adcb35ebeda130b5460d9e3187ff79ca8b3d73e61b328184717415954`. Five actual worker processes, three scopes, two certified ticks and the same previously sealed command recovered after an unrelated worker revocation, with seven signed decisions and two independently verified sync receipts. All artifact hashes match and all scopes exited. No Rust implementation changed.
+
+Reproduce with a new evidence path:
+
+```sh
+systemd-run --user --scope --quiet \
+  --unit=swarmcraft-memory-cap-test-combined-68-managed-restore-$$ \
+  -p 'Delegate=memory cpu' -p RuntimeMaxSec=240 \
+  env SWARMCRAFT_TEST_CPU_DELEGATION=1 \
+  bash scripts/e2e/linux_cgroup_memory_gate.sh \
+  unshare --user --map-root-user --net \
+  python3 research/distributed-simulation/managed_restore_lab.py \
+  --cli "$PWD/target/debug/swarmcraft" --output /tmp/sc68-managed-restore-new.json
+python3 research/distributed-simulation/verify_managed_restore_evidence.py \
+  /tmp/sc68-managed-restore-new.json --cli target/debug/swarmcraft
+```
+
+The managed restore still requires the intact source, explicit
+retirement and a current verified private journal with no pending
+vote. It cannot abandon a signed pending proposal by clearing
+votes or fabricate a local provenance prefix from opaque checkpoint
+bytes. The local SQLite and Rust journal checks do not provide
+distributed atomicity, a global freshness lease, or automatic
+canonical authority. Restart-safe exact certification after a
+collector accepts a candidate or persists a vote but fails before
+sync remains a separate integration requirement. Production
+ownerless Minecraft gameplay remains disabled.
+
 Run on Linux with mapped user/network namespace support and a delegated
 user systemd scope (from the repository root, with the tested CLI built):
 
