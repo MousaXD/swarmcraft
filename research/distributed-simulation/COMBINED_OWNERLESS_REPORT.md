@@ -374,6 +374,127 @@ retirement. It does not recover a missing local database from opaque
 checkpoint bytes alone, resolve pending split votes, prove current
 global quorum, or authorize canonical Minecraft state restoration.
 
+## Durable managed contribution and consent withdrawal
+
+The #62 contribution lifecycle is now composed with the #68 policy-
+bound worker and certified client boundary in a distinct SQLite
+application/ruleset. The managed database cannot be opened through the
+ordinary combined or contribution authority. The fixed worker-slot
+identity mapping is checked against the durable configuration on reopen.
+Every positive offer is an explicit local consent revision and cap.
+Before reserving a probe scope, the controller checks the exact private
+accepted checkpoint from its local signed validator journal, requires
+no unresolved vote, and obtains a fresh one-use signed volunteer role
+proof for every selected identity. Zero consent starts no scope;
+positive local consent alone cannot admit an ineligible identity.
+The existing role proof offers 512 MiB of reference volunteer memory,
+and the actual smaller local process cap must fit that budget. The
+CPU cap is matched exactly. This is not production resource consent
+or live remote attestation.
+
+The existing measured-placement planner chooses only a complete
+feasible assignment. The same durable local write serialization
+protects consent revisions, probe scope, generation admission,
+one-time claim, input sealing and the worker candidate transaction.
+The new scope records retain the reviewed head, exact base cut,
+original offers, consumed role observations and measured samples.
+Only the original in-process controller can admit or use that scope;
+a restart has no reusable resource-guard callback or controller token.
+It must fence and prove cleanup before starting a new scope. No
+indefinite service installation or remote cleanup inference is made.
+
+At claim, seal and candidate commit the managed authority verifies
+the pinned local signed head and exact local base, unchanged consent,
+fresh resource samples and a trusted current resource guard. The
+guard checks actual process ownership, affinity, CPU/memory controls,
+headroom and the feasibility of the exact current region placement.
+A resource/authority fault rolls back the candidate transaction and
+invalidates the controller before durably fencing the affected scope.
+A stale independent contender cannot attach a new guard or claim the
+prior controller's scope. A rejected stale receipt alone does not
+fence a valid new scope. Local consent withdrawal serializes against
+the same SQLite transaction, fences before cleanup, and cannot reset
+an accepted tick or remove an already sealed input.
+
+Each admitted scope may commit **at most one** staged tick. Its FULL
+SQLite transaction also records the exact staged cut and transitions
+to draining. No subsequent tick may use those grants. Cleanup is
+explicit: the actual harness verifies worker exit, empty/removal of
+all worker cgroups and removal of private network links. Only then
+does it release the durable scope. The managed certification adapter
+refuses an uncleaned scope, missing staged result, changed offer,
+changed governance pin or different staged cut. A released exact
+candidate uses the existing encrypted collection and sync protocol
+with no offline fallback, then the exact client publication check.
+No additional compute occurs during this slower certificate exchange.
+
+### Actual isolated managed run
+
+[Retained evidence](evidence/2026-11-26-managed-ownerless-contribution.json),
+SHA-256 `39479cdcb84197d3965821ff66a9dc607a37d3295048a967365fd00a6396506e`.
+
+| Stage | Scope | Generation | Workers | Outcome |
+| --- | ---: | ---: | ---: | --- |
+| First certified execution | 1 | 2 | 2 | Tick 1 acknowledged |
+| Local consent withdrawal after candidate | 2 | 3 | 2 | Commit refused; tick 1 retained |
+| Restart and scale-in | 3 | 4 | 1 | Same sealed command certified at tick 2 |
+
+The founder departed before the first runtime stage. The experiment
+used actual policy-authenticated TCP workers, delegated Linux kernel
+caps, fresh signed volunteer and player-role observations, and
+independent reference TCP clients. The withdrawing worker's prepared
+receipts could not promote the tentative state. The client received
+no acknowledgment, its sealed input was preserved, new overlapping
+probes were refused, and a second independent connection had
+durably recorded the new consent revision. All five worker processes
+exited and all three scopes were released. Reopening retained
+identical state, command journal, contribution status and event
+history. A newly attempted probe of the now signed-revoked worker
+was refused. A new authorized single worker at a reduced cap
+replayed the same pending command, refused old worker receipts,
+and certified the next exact tick without the founder.
+
+Independent verification checked seven signed decisions, two signed
+sync receipts, eight role observations, measured complete placements,
+eight guard observations, both certified ticks, and the refused
+withdrawal attempt. The first experimental attempt stopped after
+the expected commit refusal because its assertion expected a
+contribution-fence error for a subsequent seal; the existing
+retired-cut guard refused first. The corrected run passed and
+all recorded source/binary artifact hashes matched. This is not
+a sustained-performance result or independent physical-host proof. All 149 research regression tests passed, including real signed-journal consent, resource-fault fencing, restart and revoked-role scenarios. The strengthened lifecycle-event evidence verifier and its two mutation/replay tests passed again after the full suite reached them. Workflow-policy, release-version and diff checks passed. No Rust implementation changed.
+
+Reproduce using a new output path and the previously built CLI:
+
+```sh
+systemd-run --user --scope --quiet \
+  --unit=swarmcraft-memory-cap-test-combined-68-managed-$$ \
+  -p 'Delegate=memory cpu' -p RuntimeMaxSec=240 \
+  env SWARMCRAFT_TEST_CPU_DELEGATION=1 \
+  bash scripts/e2e/linux_cgroup_memory_gate.sh \
+  unshare --user --map-root-user --net \
+  python3 research/distributed-simulation/managed_ownerless_lab.py \
+  --cli "$PWD/target/debug/swarmcraft" --output /tmp/sc68-managed-new.json
+python3 research/distributed-simulation/verify_managed_ownerless_evidence.py \
+  /tmp/sc68-managed-new.json --cli target/debug/swarmcraft
+```
+
+The controller still owns the disposable validator/worker identities
+and supplies trusted measurements and cleanup proof. The local SQLite
+guard and Rust journal check are not a distributed atomic transaction:
+another governance decision may supersede the local check, and local
+consent changes during an already initiated network decision cannot
+undo a signed vote or accepted certificate. The scope is already
+retired before voting. Current player access is checked by the
+existing client gate; independently revalidating already sealed
+inputs against a changed player invitation set remains a separate
+fail-closed integration requirement. The preceding non-destructive
+restore operation also still targets the original combined database
+type, not this new managed lifecycle schema. Restart-safe
+certification/reconciliation of a locally staged but uncertified
+managed cut and consent-preserving separate restore require further
+integration. No live authority or actual Minecraft gameplay is enabled.
+
 Run on Linux with mapped user/network namespace support and a delegated
 user systemd scope (from the repository root, with the tested CLI built):
 

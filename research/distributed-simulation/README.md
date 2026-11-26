@@ -168,6 +168,17 @@ an earlier certified receipt and a newly certified replacement tick
 with fresh worker generations. No in-place rollback, missing-history
 reconstruction, live authority or production activation.
 
+The managed contribution follow-up combines the #62 durable consent
+ledger with signed ownerless volunteer checks and exact certified
+publication. A distinct database binds each measured scope to its
+accepted base and original controller; claim, seal and commit check
+current consent and resources. A one-tick scope fences itself on
+staging and requires cleanup before encrypted certification. Real
+TCP/cgroup evidence covers two workers, withdrawal before commit,
+restart with a preserved pending command, and a fresh single-worker
+certified recovery. No cross-store atomic lease, actual game
+admission, or managed-schema checkpoint restore is claimed.
+
 ## Original R0 evidence (2026-11-08)
 
 

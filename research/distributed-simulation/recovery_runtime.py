@@ -44,8 +44,8 @@ class RecoveryAuthority(TransitionAuthority):
             "paused", 0, canonical([asdict(Offer(s, 1, 0, 0)) for s in SLOTS]),
             b"[]", b"[]", b"[]"))
 
-    def __init__(self, path):
-        super().__init__(path)
+    def __init__(self, path, *, read_only=False):
+        super().__init__(path, read_only=read_only)
         try:
             self.status()
         except BaseException:
@@ -114,6 +114,12 @@ class RecoveryAuthority(TransitionAuthority):
                 state["phase"] = "draining"
             self._write(cur, state, "consent_changed")
 
+    def _before_probe(self, current, state, slots):
+        pass
+
+    def _before_admit(self, current, state, samples, now_ns):
+        pass
+
     def begin_probe(self):
         """Durably reserve the exact allowed local slots before any spawn."""
         with self.transaction(write=True):
@@ -125,6 +131,7 @@ class RecoveryAuthority(TransitionAuthority):
                 return []
             require(state["scope"] < 2**63-1, "scope sequence exhausted")
             state.update(phase="probing", scope=state["scope"]+1, probes=slots)
+            self._before_probe(cur, state, slots)
             self._write(cur, state, "begin_probe")
             return [state["offers"][s] for s in slots]
 
@@ -142,6 +149,7 @@ class RecoveryAuthority(TransitionAuthority):
                     and expected_scope == state["scope"], "probe scope retired")
             require(set(samples) == set(state["probes"]) and all(isinstance(v, Sample) for v in samples.values()),
                     "missing probe measurements")
+            self._before_admit(cur, state, samples, now_ns)
             decision = choose(state["offers"], samples, region_load(cur["state"]), now_ns)
             plan = decision["plan"]
             selected = sorted(set(plan["owner_by_region"])) if plan else []
