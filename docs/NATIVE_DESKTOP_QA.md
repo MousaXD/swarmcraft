@@ -171,10 +171,13 @@ commit/tree and all installer/installed file hashes. It runs:
    signed membership acceptance and exact verified checkpoint on both
    profiles.
 2. Candidate repeats the shipping journey and independently verifies
-   default player-only, disabled opt-in before explicit confirmation,
-   GUI opt-in to 512 MiB, persisted consent after restart, GUI withdrawal,
-   and persisted withdrawal after another restart. It never starts Java
-   or treats a preference as live authority.
+   default player-only (no persisted revision, no eligibility), disabled
+   opt-in before explicit confirmation, GUI opt-in to 512 MiB and 1000
+   millicores, the exact durable consent revision after restart, GUI
+   withdrawal with zero heap/CPU and a strictly newer revision, and that
+   exact withdrawn revision after another restart. An unverified/blocked
+   local checkpoint or visible preference operation error fails the test
+   immediately. It never starts Java or treats a preference as live authority.
 3. The separately installed broken-module QA package must visibly show
    `Startup failed`, an actionable diagnostic and an enabled
    `Retry startup` action. The action is clicked and failure must remain

@@ -251,6 +251,53 @@ class NativeObservationTests(unittest.TestCase):
         qa.open_hosting_contribution(ui)
         self.assertEqual(ui.presses, [])
 
+    def test_candidate_preference_requires_exact_persisted_cpu_and_revision(self):
+        ui = self.FakeUI({"#hostingContributionStatus": (qa.OPTED_IN.label, True)})
+        report = {"selected_heap_mib": 512, "selected_cpu_millicores": 1000, "consented": True,
+                  "may_host_now": False, "checkpoint_state": "no_pending_checkpoint",
+                  "consent_revision": "18446744073709551614"}
+        args = (ui, Path("/binary"), Path("/profile"), "fixture", 512)
+        with patch.object(qa, "consent", return_value=report):
+            self.assertEqual(qa.candidate_preference(*args), report)
+            self.assertEqual(qa.candidate_preference(*args, exact=report["consent_revision"]), report)
+            with self.assertRaisesRegex(qa.Failure, "changed across process restart"):
+                qa.candidate_preference(*args, exact="7")
+            with self.assertRaisesRegex(qa.Failure, "did not advance"):
+                qa.candidate_preference(*args, previous=report["consent_revision"])
+        for change in ({"selected_cpu_millicores": 2000}, {"consented": False}, {"consent_revision": None},
+                       {"consent_revision": "18446744073709551616"}, {"consent_revision": 123}):
+            with patch.object(qa, "consent", return_value={**report, **change}), self.assertRaises(qa.Failure):
+                qa.candidate_preference(*args)
+
+    def test_candidate_preference_fails_closed_for_environment_or_visible_error(self):
+        ui = self.FakeUI({"#hostingContributionStatus": (qa.PLAYER_ONLY.label, True)})
+        report = {"selected_heap_mib": 0, "selected_cpu_millicores": None, "consented": False,
+                  "may_host_now": False, "checkpoint_state": "no_pending_checkpoint", "consent_revision": None}
+        args = (ui, Path("/binary"), Path("/profile"), "fixture", 0)
+        with patch.object(qa, "consent", return_value=report):
+            self.assertEqual(qa.candidate_preference(*args, fresh=True), report)
+            self.assertFalse(qa.candidate_preference(*args[:-1], 512))
+        for change in ({"checkpoint_state": "checkpoint_blocked"}, {"may_host_now": True},
+                       {"consent_revision": "1"}, {"selected_cpu_millicores": 1000}):
+            with patch.object(qa, "consent", return_value={**report, **change}), self.assertRaises(qa.Failure):
+                qa.candidate_preference(*args, fresh=True)
+        ui.mapping["#hostingContributionError"] = ("Could not save hosting preference", True)
+        with patch.object(qa, "consent") as read:
+            with self.assertRaisesRegex(qa.Failure, "visible error"):
+                qa.candidate_preference(*args, fresh=True)
+            read.assert_not_called()
+
+    def test_candidate_withdrawal_requires_a_new_durable_zero_revision(self):
+        ui = self.FakeUI({"#hostingContributionStatus": (qa.PLAYER_ONLY.label, True)})
+        report = {"selected_heap_mib": 0, "selected_cpu_millicores": None, "consented": False,
+                  "may_host_now": False, "checkpoint_state": "no_pending_checkpoint", "consent_revision": "11"}
+        args = (ui, Path("/binary"), Path("/profile"), "fixture", 0)
+        with patch.object(qa, "consent", return_value=report):
+            self.assertEqual(qa.candidate_preference(*args, previous="10"), report)
+            self.assertEqual(qa.candidate_preference(*args, exact="11"), report)
+            with self.assertRaisesRegex(qa.Failure, "did not advance"):
+                qa.candidate_preference(*args, previous="11")
+
     def test_automatic_invitation_uses_only_visible_native_controls(self):
         class InviteUI(self.FakeUI):
             def __init__(self):

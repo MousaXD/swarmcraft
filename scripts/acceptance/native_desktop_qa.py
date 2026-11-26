@@ -562,6 +562,42 @@ def consent(binary, profile, world):
     return value
 
 
+def candidate_preference(ui, binary, profile, world, heap, *, fresh=False, previous=None, exact=None):
+    """Prove both the visible preference and the independently persisted revision.
+
+    A blocked checkpoint or explicit GUI failure is a failed test, not a
+    reason to wait until a generic timeout or bypass a native guard.
+    """
+    require(not visible(ui, text("hostingContributionError", "Could not", True)),
+            "native hosting preference operation returned a visible error")
+    require(not visible(ui, text("hostingContributionError", "Cannot", True)),
+            "native hosting preference status is unavailable")
+    report = consent(binary, profile, world)
+    require(report.get("checkpoint_state") == "no_pending_checkpoint",
+            "native hosting checkpoint state is blocked or unverified")
+    if report.get("selected_heap_mib") != heap:
+        require(not fresh and exact is None, "native persisted hosting preference unexpectedly changed")
+        return False  # an in-flight explicit update has not committed yet
+    require(report["consented"] is (heap != 0) and report.get("selected_cpu_millicores") == (1000 if heap else None),
+            "native persisted heap/CPU consent mismatch")
+    if not heap:
+        require(report.get("may_host_now") is False, "player-only device reported hosting eligibility")
+    revision = report.get("consent_revision")
+    if fresh:
+        require(revision is None, "fresh device unexpectedly has a persisted hosting revision")
+    else:
+        require(isinstance(revision, str) and re.fullmatch(r"[1-9][0-9]{0,19}", revision)
+                and int(revision) <= 2**64 - 1, "missing or invalid durable hosting revision")
+        if previous is not None:
+            require(int(revision) > int(previous), "hosting consent revision did not advance")
+        if exact is not None:
+            require(revision == exact, "hosting consent revision changed across process restart")
+    target = OPTED_IN if heap else PLAYER_ONLY
+    if not read_is(ui, target, target.label):
+        return False
+    return report
+
+
 def select_world(ui, world):
     row = Target(f'#worldCards .world-row[data-world-id="{world}"]', WORLD_NAME, ("AXButton",), True)
     click(ui, button("navWorlds", "Worlds"))
@@ -707,19 +743,20 @@ def run_positive(factory, binary, profile, guest, artifacts, candidate, lan_ip):
         world = create_world(ui, binary, profile)
         if candidate:
             open_hosting_contribution(ui)
-            wait("player-only GUI default", lambda: read_is(ui, PLAYER_ONLY, "Player only — 0 MiB / 0 CPU"))
-            require(consent(binary, profile, world)["consented"] is False, "hosting consent defaulted on")
+            wait("player-only GUI default", lambda: candidate_preference(ui, binary, profile, world, 0, fresh=True))
             opt = button("hostingContributionOptIn", "Save explicit opt-in")
             require(not ui.read(opt)["enabled"], "opt-in possible without explicit confirmation")
             ui.type(field("hostingContributionHeap", "Java server heap budget (MiB)"), "512")
+            require(ui.read(field("hostingContributionCpu", "CPU limit (millicores)"))["value"] == "1000",
+                    "candidate CPU preference default differs from the tested declaration")
             confirm = Target("#hostingContributionConfirm",
                              "I explicitly allow this device to offer the selected Java heap and CPU limit when eligible.", CHECK)
             require(not ui.read(confirm)["checked"], "hosting checkbox preselected")
             click(ui, confirm)
             require(ui.read(confirm)["checked"], "hosting checkbox not checked by UI")
             click(ui, opt)
-            wait("durable host preference", lambda: consent(binary, profile, world)["selected_heap_mib"] == 512)
-            wait("opted-in GUI", lambda: read_is(ui, OPTED_IN, "Hosting resource preference saved"))
+            opted_revision = wait("durable host preference and GUI", lambda: candidate_preference(
+                ui, binary, profile, world, 512))["consent_revision"]
         stop_network(ui, candidate)
         engine = ui.capabilities
 
@@ -731,11 +768,11 @@ def run_positive(factory, binary, profile, guest, artifacts, candidate, lan_ip):
         select_world(host, world)
         if candidate:
             open_hosting_contribution(host)
-            wait("opt-in persisted in GUI", lambda: read_is(host, OPTED_IN, "Hosting resource preference saved"))
-            require(consent(binary, profile, world)["selected_heap_mib"] == 512, "opt-in did not persist")
+            wait("opt-in persisted across process restart", lambda: candidate_preference(
+                host, binary, profile, world, 512, exact=opted_revision))
             click(host, button("hostingContributionWithdraw", "Player only — withdraw"))
-            wait("durable withdrawal", lambda: consent(binary, profile, world)["selected_heap_mib"] == 0)
-            wait("withdrawn GUI", lambda: read_is(host, PLAYER_ONLY, "Player only — 0 MiB / 0 CPU"))
+            withdrawn_revision = wait("durable withdrawal and GUI", lambda: candidate_preference(
+                host, binary, profile, world, 0, previous=opted_revision))["consent_revision"]
         token, port = start_invite_source(host, binary, profile, world, lan_ip, candidate)
         with factory(binary, guest) as joiner:
             ready(joiner, empty=True)
@@ -771,8 +808,8 @@ def run_positive(factory, binary, profile, guest, artifacts, candidate, lan_ip):
             ready(ui, empty=False)
             select_world(ui, world)
             open_hosting_contribution(ui)
-            wait("withdrawal persisted in restarted GUI", lambda: read_is(ui, PLAYER_ONLY, "Player only — 0 MiB / 0 CPU"))
-            require(consent(binary, profile, world)["consented"] is False, "withdrawal did not persist")
+            wait("withdrawal persisted in restarted GUI", lambda: candidate_preference(
+                ui, binary, profile, world, 0, exact=withdrawn_revision))
             stop_network(ui, candidate)
     return {"engine": engine, "boot_create_restart": True, "automatic_signed_invite": True, "real_signed_join_checkpoint": True,
             "host_consent_restart_withdraw": candidate}
