@@ -26,9 +26,10 @@ from network_lab import cpu_plan, safe_namespace
 from ownerless_permission import PolicyChannel, authority_for, parts, rpc, verify_profile
 from placement_lab import CappedLab, Scope
 from player_runtime import fixture, player_index
-from region_runtime import (Rejected, canonical, digest, fields, integer, region_roots, require,
+from region_runtime import (MAX_TICK, Rejected, canonical, digest, fields, integer, region_roots, require,
                             serial_step, world_root)
-from regional_authority import candidate_receipts, validated_state, wire
+from regional_authority import (MAX_GENERATION, candidate_receipts, checked_grant, checked_groups,
+                                new_grants, public_grants, validated_state, wire)
 from transition_lab import Clients
 from transition_runtime import (DurableRuntime, TransitionAuthority, checked_batch, checked_command,
                                 response, transition_view)
@@ -175,6 +176,198 @@ def review_checkpoint(binding, mapping, prior, candidate):
         require(canonical(row["response"]) == canonical(response(world,tick,result,next_state,[0,1],
                     player,request,positions[player][1])), "review committed receipt differs")
     return root
+
+
+SOURCE_PIN = ("world","generation","tick","runtime_root","cut_root")
+
+
+def restoration_source_pin(save):
+    return {key:save[key] for key in SOURCE_PIN}
+
+
+def _restoration_status(quorum, head, verifier):
+    status = quorum.auth(1,"status","--expected-world",quorum.world)
+    expected = {**head,"local_identity":verifier,"local_validator":True,"pending_proposal":None}
+    require(canonical(status) == canonical(expected),"restoration authority pin, identity or pending vote differs")
+    return status
+
+
+def _certified_prefix(ledger, current, raw, mapping):
+    """Retain only the exact signed prefix, with actual local provenance.
+
+    The full source is audited first, including its unaccepted suffix.
+    No worker receipt digest or historical generation is synthesized.
+    """
+    candidate = json.loads(raw)
+    fields(candidate,"format","player_keys","players","tick","runtime_root","regions","transaction_journal")
+    tick = candidate["tick"]
+    require(integer(tick,0,current["tick"]) and current["players"] == [0,1],
+            "certified checkpoint not available in source prefix")
+    journal = ledger._audit(current)
+    prefix = {"genesis":journal["genesis"],
+              "batches":[b for b in journal["batches"] if b["tick"] <= tick],
+              "commands":[c for c in journal["commands"] if c["request"]["tick"] <= tick]}
+    genesis, _ = validated_state(prefix["genesis"])
+    state = genesis
+    for batch in prefix["batches"]:
+        state = serial_step(state,batch["tick"],controls={p:(d,a) for p,d,a,_ in batch["batch"]})
+    require(canonical(snapshot(list(mapping),state,tick,prefix)) == raw,
+            "certified checkpoint differs from audited source prefix")
+    commits = ledger.db.execute("SELECT * FROM commits WHERE tick<=? ORDER BY tick",(tick,)).fetchall()
+    accepted_generation = commits[-1][1]
+    epochs = ledger.db.execute("SELECT * FROM epochs WHERE generation<=? ORDER BY generation",
+                               (accepted_generation,)).fetchall()
+    roots = {row[0]:row[2] for row in commits}
+    epoch_by_generation, sessions = {},set()
+    last_base = 0
+    for generation, base_tick, root, grants_raw, claimed in epochs:
+        require(integer(generation,1,accepted_generation) and integer(base_tick,last_base,tick)
+                and roots.get(base_tick) == root and integer(claimed,0,1),
+                "invalid retained epoch ancestry")
+        last_base = base_tick
+        grants = json.loads(grants_raw)
+        require(canonical(grants) == grants_raw and isinstance(grants,list),"invalid retained public grants")
+        checked_groups([g["regions"] for g in grants])
+        for grant in grants:
+            fields(grant,"world","generation","session","regions","base_tick","base_root")
+            checked_grant({**grant,"key":"0"*64}) # shape check only; no fabricated key is stored
+            require(grant["world"] == current["world"] and grant["generation"] == generation
+                    and grant["base_tick"] == base_tick and grant["base_root"] == root
+                    and grant["session"] not in sessions,"invalid retained grant provenance")
+            sessions.add(grant["session"])
+        epoch_by_generation[generation] = (base_tick,claimed)
+    require(commits[0][1] == 0 and commits[0][4:] == (None,None),"invalid retained genesis")
+    previous = 0
+    for t,g,root,cut,parent,receipt in commits[1:]:
+        epoch = epoch_by_generation.get(g)
+        require(integer(g,max(1,previous),accepted_generation) and epoch is not None
+                and epoch[0] < t and epoch[1] == 1 and digest(receipt),
+                "missing retained worker receipt provenance")
+        previous = g
+    batches = ledger.db.execute("SELECT * FROM batches WHERE tick<=? ORDER BY tick",(tick,)).fetchall()
+    commands = ledger.db.execute("SELECT * FROM commands WHERE tick<=? ORDER BY tick,player",(tick,)).fetchall()
+    return genesis,state,tick,commits,epochs,batches,commands
+
+
+def _fsync_path(path, directory=False):
+    fd = os.open(path,os.O_RDONLY | (os.O_DIRECTORY if directory else 0))
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def restore_certified_staging(quorum, source, destination, *, expected_source, source_retired,
+                              before_publish=None):
+    """Build a separate, quarantined reference database from a certified prefix.
+
+    This trusted-fixture operation requires an explicitly retired source,
+    an exact source pin and an existing independently verified local head.
+    It never opens the original for writing, replaces a path, signs a vote,
+    admits a worker or switches a running service to the new database.
+    The original must remain retired; process ownership is not proven by
+    a Boolean. A new placement/role check and rotation are required.
+    """
+    require(source_retired is True,"source runtime must be explicitly retired")
+    fields(expected_source,*SOURCE_PIN)
+    require(integer(expected_source["generation"],1,MAX_GENERATION-2)
+            and integer(expected_source["tick"],0,MAX_TICK)
+            and all(digest(expected_source[k]) for k in ("world","runtime_root","cut_root")),
+            "invalid source restoration pin or generation exhausted")
+    source = Path(source)
+    destination = Path(destination)
+    require(source.is_file() and not source.is_symlink(),"missing or linked restoration source")
+    require(destination.name not in ("",".",".."),"invalid restoration destination")
+    destination = destination.parent.resolve(strict=True)/destination.name
+    def vacant():
+        require(not any(os.path.lexists(str(destination)+suffix) for suffix in ("","-journal","-wal","-shm")),
+                "restoration destination or sidecar already exists")
+    vacant()
+    head = dict(quorum.head)
+    mapping = tuple(quorum.mapping)
+    require(len(mapping) == len(set(mapping)) == 2 and all(digest(k) for k in mapping)
+            and parts(quorum.binding) == (expected_source["world"],head["policy_hash"],head["compatibility"])
+            and quorum.world == head["world_id"] == "scownerless:"+expected_source["world"]
+            and head["participation_mode"] == "invite_only","restoration world/policy pin differs")
+    verifiers = [v["peer_id"] for v in head["validators"] if v["public_key"] == quorum.keys[1]]
+    require(len(verifiers)==1,"restoration verifier not in pinned roster")
+    verifier = verifiers[0]
+    Authority = combined_authority(quorum.binding)
+    with tempfile.TemporaryDirectory(prefix=".sc68-restore-",dir=destination.parent) as temp:
+        temp = Path(temp)
+        checkpoint = temp/"certified.bin"
+        _restoration_status(quorum,head,verifier)
+        copied = quorum.auth(1,"recovery-copy","--expected-world",quorum.world,
+                             "--expected-head",head["head"],"--output",checkpoint)
+        raw = checkpoint.read_bytes()
+        require(copied == {"classification":"ownerless_reference_recovery_copy_only",
+                           "world_id":quorum.world,"head":head["head"],"checkpoint":head["checkpoint"],
+                           "bytes":len(raw),"runtime_activation":False,"write_authority":False}
+                and 0 < len(raw) <= 1024*1024
+                and quorum.state_hash(checkpoint) == head["checkpoint"],"restoration checkpoint commitment differs")
+        original = Authority(source,read_only=True)
+        try:
+            # Hold a consistent source read transaction through publication.
+            # The caller still owns the retirement/process-lifecycle check.
+            with original.transaction():
+                current = original._read()
+                require(restoration_source_pin(current)==expected_source,"restoration source pin changed")
+                genesis,state,tick,commits,epochs,batches,commands = _certified_prefix(original,current,raw,mapping)
+                require(tick < current["tick"],"source has not advanced beyond certified checkpoint")
+                generation = current["generation"]+1
+                accepted = commits[-1]
+                grants = new_grants(current["world"],generation,tick,accepted[2],[FULL])
+                old_sessions = {g["session"] for _,_,_,blob,_ in original.db.execute("SELECT * FROM epochs")
+                                for g in json.loads(blob)}
+                require(all(g["session"] not in old_sessions for g in grants),"restoration reused a worker session")
+                candidate_path = temp/"restored.db"
+                restored = Authority.create(candidate_path,current["world"],genesis,[0,1],[FULL])
+                try:
+                    with restored.transaction(write=True):
+                        restored.db.execute("DELETE FROM commits")
+                        restored.db.execute("DELETE FROM epochs")
+                        restored.db.executemany("INSERT INTO commits VALUES(?,?,?,?,?,?)",commits)
+                        restored.db.executemany("INSERT INTO epochs VALUES(?,?,?,?,?)",epochs)
+                        restored.db.executemany("INSERT INTO batches VALUES(?,?,?,?)",batches)
+                        restored.db.executemany("INSERT INTO commands VALUES(?,?,?,?,?)",commands)
+                        # Consume the quarantine generation without any
+                        # worker. An explicit future rotation is mandatory.
+                        restored.db.execute("INSERT INTO epochs VALUES(?,?,?,?,1)",
+                                            (generation,tick,accepted[2],canonical(public_grants(grants))))
+                        restored.db.execute("""UPDATE world SET generation=?,accepted_generation=?,claimed=1,
+                            tick=?,runtime_root=?,cut_root=?,state=?,grants=? WHERE singleton=1""",
+                            (generation,accepted[1],tick,accepted[2],accepted[3],canonical(wire(state)),canonical(grants)))
+                        restored._state_cache = None
+                        require(canonical(committed_snapshot(restored,mapping,restored._read()))==raw,
+                                "restored staging differs from certified bytes")
+                finally:
+                    restored.close()
+                reopened = Authority(candidate_path,read_only=True)
+                try:
+                    result = reopened.save()
+                    require(result["generation"]==generation and result["claimed"]
+                            and canonical(observed_snapshot(reopened,list(mapping)))==raw,
+                            "cold restored staging verification differs")
+                finally:
+                    reopened.close()
+                _fsync_path(candidate_path)
+                if before_publish is not None:
+                    before_publish() # isolated failure/race injection only
+                _restoration_status(quorum,head,verifier)
+                vacant()
+                # The temporary database is already complete and fsynced.
+                # Link is atomic and refuses an existing destination.
+                os.link(candidate_path,destination)
+                _fsync_path(destination.parent,directory=True)
+        finally:
+            original.close()
+    return {"classification":"ownerless_reference_staging_restored_quarantined",
+            "source":expected_source.copy(),"world_id":quorum.world,"head":head["head"],
+            "checkpoint":head["checkpoint"],"restored_tick":tick,"retired_generation":current["generation"],
+            "quarantine_generation":generation,"discarded_ticks":current["tick"]-tick,
+            "source_preserved":True,"rotation_required":True,"live_quorum_verified":False,
+            "runtime_activation":False,"canonical_authority":False,"write_authority":False,
+            "player_admission":False,"worker_admission":False}
 
 
 class CertifiedClientGate:

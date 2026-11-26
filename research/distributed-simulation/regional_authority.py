@@ -191,18 +191,23 @@ class Authority:
     def _validate_receipt(self, current, receipt):
         return receipt
 
-    def __init__(self, path):
+    def __init__(self, path, *, read_only=False):
         self.path = Path(path).resolve()
+        require(type(read_only) is bool, "invalid authority access mode")
+        self.read_only = read_only
         # One-entry cache of validated immutable state, keyed by the exact
         # SQLite BLOB read in the current transaction (not a tick or root).
         # Never cache metadata, grants, journal decisions, or DB transactions.
         self._state_cache = None
         self.phase = nullcontext  # optional benchmark-only timing context
         self.transaction_event = None  # optional boundary-only benchmark observer
-        # mode=rw: missing authority is NOT an empty new world.
-        self.db = sqlite3.connect(self.path.as_uri() + "?mode=rw", uri=True,
+        # Neither mode creates a missing authority. Recovery inspection
+        # must not write to the original even if a caller tries to rotate.
+        self.db = sqlite3.connect(self.path.as_uri() + ("?mode=ro" if read_only else "?mode=rw"), uri=True,
                                   isolation_level=None, timeout=5)
         try:
+            if read_only:
+                self.db.execute("PRAGMA query_only=ON")
             self.db.execute("PRAGMA synchronous=FULL")
             require(self.db.execute("PRAGMA application_id").fetchone()[0] == self.app_id
                     and self.db.execute("PRAGMA user_version").fetchone()[0] == self.schema
@@ -270,6 +275,7 @@ class Authority:
 
     @contextmanager
     def transaction(self, write=False):
+        require(not write or not self.read_only, "read-only authority inspection")
         with self.phase("sqlite_begin"):
             self.db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
         try:

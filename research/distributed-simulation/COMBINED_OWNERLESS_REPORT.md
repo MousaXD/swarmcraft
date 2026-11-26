@@ -265,6 +265,115 @@ crossings, two real writer SIGKILL faults, two replay refusals and two
 recovered receipts independently verify. No Rust implementation was
 changed; the network experiment used the previously verified binary.
 
+## Non-destructive certified staging restoration
+
+The recovery adapter now restores an exact certified prefix from an
+audited, locally advanced staging database, rather than rolling the
+source back in place. The caller explicitly selects an existing signed
+private authority head, the exact source world/generation/tick/root/cut,
+and a new destination, and must have retired the source runtime.
+The retirement assertion is a trusted-controller precondition, not
+remote process attestation. The actual isolated run below checks
+worker process exit and releases its kernel scope before restoration.
+
+The adapter checks the selected current validator's signed journal,
+exact world, policy, compatibility, fence and head, requires no pending
+vote, obtains the retained bytes with the existing recovery-copy
+operation, and verifies their cryptographic commitment. It opens the
+source in SQLite read-only mode with query-only enforcement, audits
+the complete local state, and holds a consistent read transaction
+through restoration. It independently replays the exact certified
+prefix from genesis, including the committed input batch and receipts.
+The resulting canonical checkpoint must equal the retained signed
+bytes. A missing, corrupt, behind, or divergent source cannot be
+silently repaired. In particular, no worker receipt hash or epoch
+history is fabricated from a checkpoint that lacks those fields.
+
+Only the actual local commit rows, command results, batches and
+historical public epoch records through the certified cut are copied.
+The abandoned suffix and pending commands are excluded; no old private
+worker session key is copied. A newly created private database reserves
+a consumed quarantine generation strictly above the original source
+generation. A worker runtime cannot claim it. An explicit later
+rotation and separately reviewed role/placement checks are required
+to resume execution. This is a trusted local isolation boundary, not
+an automatically installed distributed fence over other copies.
+
+The new SQLite file is constructed with FULL durability under a
+private temporary directory, independently audited, closed, reopened
+read-only and compared to the exact certified checkpoint. The
+validator pin is checked again immediately before publication. A
+same-filesystem hard link publishes the complete file without
+replacement, followed by destination-directory fsync. Existing
+destination files, symlinks or SQLite sidecars cause refusal. A real
+SIGKILL before publication leaves the source intact and no destination;
+a private scratch directory may remain for manual cleanup. A failure
+after the link is created may leave a complete destination; it must
+be inspected rather than overwritten. The adapter never switches
+runtime paths or automatically rolls back a signed journal. A race
+after the last local authority check is not ruled out by a global
+lock; the client gate still rechecks every state-bearing access.
+
+### Actual isolated restoration run
+
+[Retained evidence](evidence/2026-11-26-certified-staging-restore.json),
+SHA-256 `d411dc34460d7d1680e7f94391813214c354e484e2b15f123d163cb05d073b87`.
+
+The separate `certified_restore_lab.py` run exercised actual
+authenticated reference TCP clients, policy-bound worker processes and
+Linux cgroup caps in isolated namespaces:
+
+| Stage | Local generation | Tick | Client outcome |
+| --- | ---: | ---: | --- |
+| First certified execution | 1 | 1 | Committed receipt |
+| Founder departure and abandoned advance | 2 | 2 | No acknowledgment |
+| Separate certified restore | 3 (quarantine) | 1 | Exact prior receipt recovered |
+| Fresh measured worker and new execution | 4 | 2 | Replacement certified receipt |
+
+The original database's before/after SHA-256 matched exactly. The
+restored history retained its original genesis and tick-one commit
+rows and public epoch record, not the abandoned tick-two row. Its
+quarantine generation could not be claimed, old worker receipts were
+refused and the discarded command had no certified receipt. A fresh
+reference client recovered the exact tick-one result over TCP; a
+different command subsequently committed at tick two after encrypted
+collection and signed checkpoint synchronization. The departed
+founder's journal remained unchanged. The independent verifier
+replayed all three local candidate transitions, verified five signed
+governance decisions and three sync signatures, and checked three
+worker processes, four TCP client sessions and seven reference role
+observations. All scopes exited, and recorded source and binary
+artifact hashes matched. These are local observations, not independent
+physical-host attestation or real Minecraft recovery.
+
+Additional real-CLI regressions exercise a certified nonzero prefix,
+genesis restore after a process kill, exact receipt recovery,
+uncertified suffix and pending input removal, explicit rotation,
+source-pin and no-clobber checks, divergent history refusal, a
+governance advance during restoration, and a pending vote that cannot
+be reset. The original database remains untouched in each case. All 143 research regression tests passed, including the explicitly enabled signed-journal restoration tests, retained evidence mutations and read-only authority checks. Workflow-policy, release-version and diff checks passed locally. No Rust code was changed; the actual network experiment used the previously verified CLI binary.
+
+Reproduce with a new output path and the previously built CLI:
+
+```sh
+systemd-run --user --scope --quiet \
+  --unit=swarmcraft-memory-cap-test-combined-68-restore-$$ \
+  -p 'Delegate=memory cpu' -p RuntimeMaxSec=240 \
+  env SWARMCRAFT_TEST_CPU_DELEGATION=1 \
+  bash scripts/e2e/linux_cgroup_memory_gate.sh \
+  unshare --user --map-root-user --net \
+  python3 research/distributed-simulation/certified_restore_lab.py \
+  --cli "$PWD/target/debug/swarmcraft" --output /tmp/sc68-restore-new.json
+python3 research/distributed-simulation/verify_certified_restore_evidence.py \
+  /tmp/sc68-restore-new.json --cli target/debug/swarmcraft
+```
+
+The operation still requires an intact local provenance prefix, a
+current verified private reference journal and explicit source
+retirement. It does not recover a missing local database from opaque
+checkpoint bytes alone, resolve pending split votes, prove current
+global quorum, or authorize canonical Minecraft state restoration.
+
 Run on Linux with mapped user/network namespace support and a delegated
 user systemd scope (from the repository root, with the tested CLI built):
 

@@ -159,6 +159,15 @@ bounded reference client acknowledgment window is not a 20 Hz result.
 Creation and other governance decisions remain offline, and the trusted
 controller owns all validator profiles.
 
+The separate certified staging restoration follow-up preserves the
+original local database, reconstructs the exact signed prefix using
+its existing audited commit provenance, and publishes a new
+quarantined SQLite copy without replacement. Real TCP/cgroup evidence
+demonstrates an abandoned tick without an acknowledgment, recovery of
+an earlier certified receipt and a newly certified replacement tick
+with fresh worker generations. No in-place rollback, missing-history
+reconstruction, live authority or production activation.
+
 ## Original R0 evidence (2026-11-08)
 
 

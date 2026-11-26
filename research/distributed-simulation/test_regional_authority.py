@@ -69,6 +69,24 @@ class AuthorityTests(unittest.TestCase):
             reopened.close()
         self.assert_refused(receipts)
 
+    def test_read_only_inspection_cannot_claim_rotate_or_write(self):
+        original = self.path.read_bytes()
+        inspection = Authority(self.path,read_only=True)
+        try:
+            state = inspection.save()
+            self.assertEqual(state,self.ledger.save())
+            self.assertEqual(inspection.history(),self.ledger.history())
+            for attempt in (lambda:inspection.claim(state["generation"],state["tick"],state["runtime_root"]),
+                            lambda:inspection.rotate(state["generation"],state["tick"],state["runtime_root"],GROUPS),
+                            lambda:inspection.commit([])):
+                with self.assertRaisesRegex(Rejected,"read-only authority inspection"):
+                    attempt()
+            with self.assertRaises(sqlite3.OperationalError):
+                inspection.db.execute("DELETE FROM world")
+        finally:
+            inspection.close()
+        self.assertEqual(self.path.read_bytes(),original)
+
     def test_reassign_while_old_candidate_exists(self):
         old, receipts = self.candidate()
         prior = self.ledger.save()

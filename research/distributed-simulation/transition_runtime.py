@@ -95,8 +95,8 @@ class TransitionAuthority(Authority):
         db.execute("""CREATE TABLE batches(
             tick INTEGER PRIMARY KEY, parent TEXT NOT NULL, inputs BLOB NOT NULL, result TEXT)""")
 
-    def __init__(self, path):
-        super().__init__(path)
+    def __init__(self, path, *, read_only=False):
+        super().__init__(path, read_only=read_only)
         try:
             self.audit()
         except BaseException:
