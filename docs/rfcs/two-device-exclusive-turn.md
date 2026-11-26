@@ -758,3 +758,89 @@ and both journal digests remained unchanged. No new JVM, canonical
 world or authority was created. The retained source had a test-only
 permission-probe mod; that mod and the installed dependency closure are
 not part of this three-JAR pin. [Retained evidence](../../research/exclusive-turn/evidence/2026-11-26-core-runtime-preflight.txt).
+
+### Exact offline Linux runtime package
+
+For the next isolated adapter milestone, a distinct package fingerprint
+commits the core pin, Linux architecture and a bounded, path-independent
+inventory of all package files, directories, executable bits and internal
+Java legal-file links. This is intentionally separate from the existing
+three-JAR and normal canonical compatibility domains. It does not silently
+upgrade old reference worlds or grant permission to start a process.
+
+The supported layout is a newly staged, operator-reviewed directory:
+
+```text
+package/
+  java/                             # exact Java 25 tree, not system Java
+  server.jar                        # reviewed Minecraft bundler JAR
+  versions/26.1.2/server-26.1.2.jar  # extracted server
+  libraries/...                     # exact bundler libraries.list paths
+  fabric-profile.json               # pinned Fabric server profile
+  fabric-libraries/...              # exact coordinate-derived JAR filenames
+  mods/swarmcraft-fabric.jar         # bridge with single embedded Fabric API
+```
+
+The package verifier checks the extracted server and all listed Minecraft
+libraries against their bundler SHA-256 records, requires the pinned Fabric
+server entry point and exactly the seven expected loader-library identities,
+checks the Fabric library size and SHA-256 when supplied (required for the
+six non-loader dependencies), and validates the core JAR and embedded
+Fabric API metadata. All dependency bytes, including the loader without
+a profile SHA-256, are committed by the package inventory. The Java release
+metadata must declare Java 25 and the local Linux architecture, and the
+package must contain a nonempty Java executable, modules and JVM/native
+Java libraries. No Java binary is executed during inspection.
+
+Outside `java/`, only the exact declared files and their directory prefixes
+are accepted. No additional mods, generated `.fabric` cache, world data,
+launcher scripts or runtime configuration are permitted. Paths are bounded
+and canonical; group/world-writable or special files, hardlinks and
+symlinks are rejected except for internal relative regular-file links under
+`java/legal/` (required by the retained Temurin package). Each file is hashed
+through an opened descriptor and its identity is rechecked. A second tree
+enumeration detects ordinary concurrent changes. The package is limited to
+4,096 entries, 1 GiB total, 256 MiB per file, and depth below 32. This is a
+cooperative local review, not a sandbox against a malicious same-account
+writer or proof of immutable ownership after the lock is released.
+
+```sh
+swarmcraft exclusive-turn save runtime-package-pin --package "$PACKAGE"
+# Use the independently reviewed package compatibility pin when capturing
+# the initial stopped save and obtaining the two genesis approvals.
+swarmcraft exclusive-turn save verify-runtime-package --package "$PACKAGE" \
+  --bundle "$BUNDLE" --expected-manifest "$MANIFEST" \
+  --expected-state-root "$STATE_ROOT" --expected-compatibility "$PACKAGE_PIN"
+swarmcraft --data-dir "$HOLDER_PROFILE" exclusive-turn save verify-held-runtime-package \
+  --package "$PACKAGE" --expected-world "$WORLD" --expected-grant "$GRANT" \
+  --expected-checkpoint "$COMMITMENT"
+```
+
+The last command holds the stable reference-world lock, verifies exact
+signed local Held state and the entire retained save, verifies the package
+pin and `level.dat` DataVersion, and emits a non-authorizing report. A
+different package or old three-JAR pin is not equivalent. This narrow
+Linux package requires identical bytes and architecture across devices;
+cross-platform package negotiation is not implemented. The package is
+not the normal runtime installer's layout, does not fetch or stage artifacts
+into a live profile, and does not support arbitrary modpacks. Hashes and
+metadata are not upstream signatures. Native OS libraries, Java execution,
+dependency resolution, dynamic cache generation, save datapack semantics,
+EULA, hosting resource consent, network isolation and supervised runtime
+ownership remain separate gates. Do not launch this package through the
+ordinary world authority path.
+
+The [local real-fixture gate](../../research/exclusive-turn/verify_runtime_package.py)
+qualified the actual reviewed JDK, 39 Minecraft library JARs, seven Fabric
+library JARs, bundled server and embedded API from the retained test
+artifacts. The staged package held 649 entries, 244 regular files and
+450,800,606 bytes. The test used disposable copies and normalized their
+permissions, deliberately omitting the old test-only permission probe and
+generated server cache. It verified relocation, exact signed holder
+compatibility and DataVersion 4790, denied a replica, a missing or altered
+Minecraft dependency, an extra mod and changed Java executable, and
+re-verified the restored exact package while both journals remained
+unchanged. The source save was copied under its Java-compatible session
+lock. This does not establish a real launch with the staged package or
+verify the source save was originally produced by precisely that mod set.
+[Retained evidence](../../research/exclusive-turn/evidence/2026-11-26-runtime-package-preflight.txt).

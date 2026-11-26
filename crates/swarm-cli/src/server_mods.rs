@@ -573,6 +573,10 @@ fn sync_parent(parent: &Path) -> Result<()> {
 }
 
 pub(crate) fn read_zip_entry(bytes: &[u8], wanted: &str) -> Result<Vec<u8>> {
+    read_zip_entry_bounded(bytes, wanted, MAX_METADATA_BYTES)
+}
+
+pub(crate) fn read_zip_entry_bounded(bytes: &[u8], wanted: &str, max_output: usize) -> Result<Vec<u8>> {
     let eocd = find_eocd(bytes)?;
     if read_u16(bytes, eocd + 4)? != 0 || read_u16(bytes, eocd + 6)? != 0 {
         bail!("multi-disk ZIP/JAR files are unsupported");
@@ -638,11 +642,19 @@ pub(crate) fn read_zip_entry(bytes: &[u8], wanted: &str) -> Result<Vec<u8>> {
             bail!("ZIP central directory entry exceeds declared size");
         }
     }
+    ensure_zip(cursor == central_end, "ZIP central directory length differs")?;
     let entry = found.ok_or_else(|| anyhow!("JAR does not contain root {wanted}"))?;
-    if entry.compressed_size > MAX_METADATA_COMPRESSED_BYTES || entry.uncompressed_size > MAX_METADATA_BYTES {
-        bail!("fabric.mod.json exceeds safety limits");
+    if entry.compressed_size > MAX_METADATA_COMPRESSED_BYTES.max(max_output) || entry.uncompressed_size > max_output {
+        bail!("JAR entry exceeds safety limits");
     }
-    extract_zip_entry(bytes, &entry)
+    extract_zip_entry(bytes, &entry, wanted, max_output)
+}
+
+fn ensure_zip(valid: bool, message: &str) -> Result<()> {
+    if !valid {
+        bail!("{message}");
+    }
+    Ok(())
 }
 
 fn find_eocd(bytes: &[u8]) -> Result<usize> {
@@ -661,7 +673,7 @@ fn find_eocd(bytes: &[u8]) -> Result<usize> {
     bail!("ZIP end-of-central-directory record not found")
 }
 
-fn extract_zip_entry(bytes: &[u8], entry: &ZipEntry) -> Result<Vec<u8>> {
+fn extract_zip_entry(bytes: &[u8], entry: &ZipEntry, wanted: &str, max_output: usize) -> Result<Vec<u8>> {
     let local = entry.local_header_offset;
     if read_u32(bytes, local)? != 0x0403_4b50 {
         bail!("invalid ZIP local header");
@@ -673,6 +685,12 @@ fn extract_zip_entry(bytes: &[u8], entry: &ZipEntry) -> Result<Vec<u8>> {
     }
     let name_len = read_u16(bytes, local + 26)? as usize;
     let extra_len = read_u16(bytes, local + 28)? as usize;
+    let name_start = local.checked_add(30).context("ZIP local header overflows")?;
+    let name_end = name_start.checked_add(name_len).context("ZIP local name overflows")?;
+    ensure_zip(
+        bytes.get(name_start..name_end) == Some(wanted.as_bytes()),
+        "ZIP local name conflicts with central directory",
+    )?;
     let data_start = local
         .checked_add(30)
         .and_then(|value| value.checked_add(name_len))
@@ -682,7 +700,7 @@ fn extract_zip_entry(bytes: &[u8], entry: &ZipEntry) -> Result<Vec<u8>> {
     let compressed = bytes.get(data_start..data_end).context("truncated ZIP entry")?;
     let output = match entry.compression {
         0 => compressed.to_vec(),
-        8 => inflate_raw(compressed, entry.uncompressed_size, MAX_METADATA_BYTES)?,
+        8 => inflate_raw(compressed, entry.uncompressed_size, max_output)?,
         other => bail!("unsupported ZIP compression method {other}"),
     };
     if output.len() != entry.uncompressed_size {

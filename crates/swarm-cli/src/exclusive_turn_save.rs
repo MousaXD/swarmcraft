@@ -128,6 +128,29 @@ pub enum SaveCommand {
         #[command(flatten)]
         artifacts: CoreArtifacts,
     },
+    /// Derive a candidate pin from an exact offline Linux runtime package.
+    RuntimePackagePin {
+        #[arg(long)]
+        package: PathBuf,
+    },
+    /// Verify exact offline save bytes, their version, and the pinned runtime package inventory.
+    VerifyRuntimePackage {
+        #[arg(long)]
+        bundle: PathBuf,
+        #[command(flatten)]
+        digests: Digests,
+        #[arg(long)]
+        package: PathBuf,
+    },
+    /// Verify the exact local held reference grant and retained save against the runtime package.
+    VerifyHeldRuntimePackage {
+        #[command(flatten)]
+        pin: super::Pin,
+        #[arg(long)]
+        expected_checkpoint: Hash32,
+        #[arg(long)]
+        package: PathBuf,
+    },
     /// Verify the exact independently pinned manifest and every blob.
     Verify {
         #[arg(long)]
@@ -239,6 +262,7 @@ mod linux {
     use swarm_cli::exclusive_turn_compatibility::{
         inspect_core_runtime, verify_level_version, CoreRuntimePin, MAX_CORE_JAR_BYTES, MAX_LEVEL_COMPRESSED_BYTES,
     };
+    use swarm_cli::exclusive_turn_runtime_package::{inspect_runtime_package, RuntimePackagePin};
     use swarm_consensus::exclusive_turn::{verify_exclusive_turn_history, verify_exclusive_turn_offer};
     use swarm_protocol::{
         exclusive_turn_reference_commitment, ExclusiveTurnGenesisV1, ExclusiveTurnHistoryV1,
@@ -929,6 +953,41 @@ mod linux {
             manifest.compatibility == pin.fingerprint()?,
             "core runtime artifact pin differs from save compatibility"
         );
+        verify_level_bundle(bundle, manifest, pin.data_version, runtime_report(&pin)?)
+    }
+
+    fn package_report(package: &RuntimePackagePin) -> Result<serde_json::Value> {
+        let mut report = runtime_report(&package.core)?;
+        report["compatibility"] = package.fingerprint.to_string().into();
+        report["core_compatibility"] = package.core.fingerprint()?.to_string().into();
+        report["package_tree_hash"] = package.tree_hash.to_string().into();
+        report["package_files"] = package.files.into();
+        report["package_entries"] = package.entries.into();
+        report["package_bytes"] = package.bytes.into();
+        report["minecraft_library_count"] = package.minecraft_libraries.into();
+        report["fabric_library_count"] = package.fabric_libraries.into();
+        report["java_release_version"] = package.java_version.clone().into();
+        report["embedded_fabric_api_version"] = package.embedded_fabric_api_version.clone().into();
+        report["package_inventory_verified"] = true.into();
+        report["declared_dependency_files_verified"] = true.into();
+        report["artifact_publisher_verified"] = false.into();
+        report["java_executed"] = false.into();
+        report["package_platform"] = format!("linux-{}", std::env::consts::ARCH).into();
+        Ok(report)
+    }
+
+    fn verify_package_bundle(bundle: &Path, manifest: &Manifest, path: &Path) -> Result<serde_json::Value> {
+        let package = inspect_runtime_package(path)?;
+        ensure!(manifest.compatibility == package.fingerprint, "runtime package pin differs from save compatibility");
+        verify_level_bundle(bundle, manifest, package.core.data_version, package_report(&package)?)
+    }
+
+    fn verify_level_bundle(
+        bundle: &Path,
+        manifest: &Manifest,
+        expected_version: i32,
+        mut result: serde_json::Value,
+    ) -> Result<serde_json::Value> {
         verify_bundle(bundle, manifest)?;
         let entry = manifest.entries.iter().find(|entry| entry.path == "level.dat").context("missing level.dat")?;
         let Kind::File { size, hash } = entry.kind else { bail!("level.dat is not a file") };
@@ -941,8 +1000,7 @@ mod linux {
             bytes.len() as u64 == size && Hash32::from_domain_bytes(BLOB_DOMAIN, &bytes) == hash,
             "level.dat bytes changed after bundle verification"
         );
-        let version = verify_level_version(&bytes, pin.data_version)?;
-        let mut result = runtime_report(&pin)?;
+        let version = verify_level_version(&bytes, expected_version)?;
         let checkpoint = manifest.checkpoint()?;
         result["manifest_hash"] = checkpoint.manifest_hash.to_string().into();
         result["state_root"] = checkpoint.state_root.to_string().into();
@@ -1331,6 +1389,43 @@ mod linux {
                 verify_exact(&bundle, journal.checkpoint, head.compatibility(), &store.state(journal.checkpoint)?)?;
                 let mut result = verify_runtime_bundle(&bundle, &manifest, &artifacts)?;
                 result["classification"] = "exclusive_turn_held_core_runtime_preflight".into();
+                result["signed_compatibility_verified"] = true.into();
+                result["independent_checkpoint_pins_verified"] = true.into();
+                result["local_held_reference_verified"] = true.into();
+                result["world_id"] = head.world().to_string().into();
+                result["grant"] = head.grant().to_string().into();
+                result["epoch"] = head.epoch().into();
+                result["fence"] = head.fence().into();
+                print_document(&result)
+            }
+            SaveCommand::RuntimePackagePin { package } => {
+                let mut result = package_report(&inspect_runtime_package(&package)?)?;
+                result["classification"] = "exclusive_turn_candidate_runtime_package_pin".into();
+                print_document(&result)
+            }
+            SaveCommand::VerifyRuntimePackage { bundle, digests, package } => {
+                let manifest = load_bundle(&bundle)?;
+                manifest.check_pins(&digests)?;
+                let mut result = verify_package_bundle(&bundle, &manifest, &package)?;
+                result["classification"] = "exclusive_turn_offline_runtime_package_preflight".into();
+                result["independent_checkpoint_pins_verified"] = true.into();
+                print_document(&result)
+            }
+            SaveCommand::VerifyHeldRuntimePackage { pin, expected_checkpoint, package } => {
+                let (store, journal, head) = opened(paths, &pin)?;
+                ensure!(
+                    head.save_backed() && journal.phase == Phase::Held && head.holder() == journal.identity,
+                    "runtime package preflight requires exact held save-backed reference turn"
+                );
+                ensure!(
+                    journal.checkpoint.reference_commitment == expected_checkpoint,
+                    "local checkpoint differs from expected pin"
+                );
+                let bundle = retained_path(&store, journal.checkpoint)?;
+                let manifest = load_bundle(&bundle)?;
+                verify_exact(&bundle, journal.checkpoint, head.compatibility(), &store.state(journal.checkpoint)?)?;
+                let mut result = verify_package_bundle(&bundle, &manifest, &package)?;
+                result["classification"] = "exclusive_turn_held_runtime_package_preflight".into();
                 result["signed_compatibility_verified"] = true.into();
                 result["independent_checkpoint_pins_verified"] = true.into();
                 result["local_held_reference_verified"] = true.into();
