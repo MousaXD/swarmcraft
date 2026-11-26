@@ -1,0 +1,24 @@
+{
+  "classification": "same fresh CLI fixture, read-only status under normal uid and mapped-user namespace",
+  "mapped": {
+    "checkpoint_state": "checkpoint_blocked",
+    "consented": false,
+    "may_host_now": false,
+    "selected_heap_mib": 0
+  },
+  "mapped_private_fixture_uid": 0,
+  "mapped_root_uid": 65534,
+  "mapped_tmp_uid": 65534,
+  "normal": {
+    "checkpoint_state": "no_pending_checkpoint",
+    "consented": false,
+    "may_host_now": false,
+    "selected_heap_mib": 0
+  },
+  "package_cli_sha256": "7baadef59000bfc9eb2cf7fe7a3edd0f1d35cea9c0c22b2e7627b790fa929bc0",
+  "pending_shutdown_marker_count": 0,
+  "product_guard_changed": false,
+  "runtime_ownership_record_count": 0,
+  "source_commit": "d6e79b0df0f139e385076d60ee58647e737185e3",
+  "warning_category": "unsafe hosting state ancestor /"
+}
