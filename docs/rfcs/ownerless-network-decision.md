@@ -304,6 +304,72 @@ proposal or reconstruct its pending votes; that still requires the
 reviewed recovery protocol above. It remains subject to the CFT
 and trusted profile/storage assumptions and independent review.
 
+## Bounded repeated certified-head reconciliation
+
+The one-shot discovery path also supports repeated reconciliation
+with independently configured endpoints. Operators explicitly pin
+the same certified common anchor and world on both profiles:
+
+```sh
+swarmcraft --data-dir /private/validator-b ownerless authority decision serve-heads \
+  --expected-world "$WORLD" --expected-anchor "$ANCHOR" \
+  --from "$VALIDATOR_A" --bind 127.0.0.1:0 --max-sessions 16 \
+  --run-seconds 120 --confirm
+
+swarmcraft --data-dir /private/validator-a ownerless authority decision reconcile-heads \
+  --expected-world "$WORLD" --expected-anchor "$ANCHOR" \
+  --peer "$VALIDATOR_B@$ADDRESS" --rounds 3 --interval-seconds 2 \
+  --run-seconds 120 --confirm
+```
+
+A separate Noise prologue domain binds the common anchor, exact
+world and two peer identities. Each connection authenticates fresh
+ephemeral keys; the requester sends its current base as an exact
+32-byte encrypted field only after authentication. The responder
+requires that base to be in its verified accepted ancestry at or
+after the configured anchor. Both peers must be in the anchor,
+requested base and served target rosters with the same verified
+keys. It reopens and verifies its journal before authentication and
+again before disclosure. A stale responder that does not possess
+the requested base sends no history. A newly enrolled validator
+not in the anchor requires a newly reviewed common anchor and
+configuration. One listener serves only one explicitly pinned
+requester; there is no public multiplexing or endpoint discovery.
+
+Every round reopens the durable signed journal and checks identity,
+anchor and previously observed accepted ancestry. The requester
+never persists a transport cursor, and on restart derives the
+current base from the existing verified journal, not a saved
+network response. It filters explicitly configured peers removed
+from its current roster before contacting them. A local journal
+error, conflicting authenticated certificate chain or concurrent
+accepted-base change during a round stops the operation. A missing
+complete response instead produces a read-only round with
+`observed_certified_head: false`; no vote, checkpoint or journal
+is replaced. Subsequent rounds can retry unavailable endpoints.
+The same complete-history comparison, exact checkpoint commitment,
+stable-lock acceptance and pending-vote rules as one-shot discovery
+apply. A same-head reply never clears a later pending vote.
+
+The listener accepts at most 128 sessions (including rejected
+ones) in an explicit 1–900 second window; each session is bounded
+by that window and the existing ten-second deadline. The poller
+allows at most 64 rounds, intervals of 1–30 seconds and a total
+10–900 second window, with the existing seven-second network
+budget per round. It does not start a further round when the
+remaining budget cannot accommodate the interval and a full
+session. Storage and stdout stalls may still delay process exit;
+network deadlines are not OS process deadlines. The final JSON
+records completed and requested rounds explicitly; completion
+means the polling loop finished, not that all peers responded.
+The listener counts successful transfers and rejected attempts,
+not remote durable acceptance. There is no automatic vote,
+unreviewed proposal recovery, service installation, indefinite
+daemon, lease, global freshness claim or production activation.
+An operator must explicitly restart a bounded run; the signed
+journal is the only retained reconciliation state. The one-shot
+commands remain available in their original distinct domain.
+
 ## Local verification (26 November 2026)
 
 Fourteen authority CLI and two creation CLI scenarios passed on Linux,
@@ -422,12 +488,28 @@ preserved, with the stale pull refused. No live world, control, or
 runtime records were created. Strict all-target/all-feature CLI Clippy,
 formatting, workflow-policy and release-version checks passed locally.
 
+### Repeated reconciliation verification (26 November 2026)
+
+All 27 authority and two creation CLI integration scenarios passed,
+including three new real TCP/process scenarios for repeated
+reconciliation. The requester accepted consecutive certified heads
+without replacing its common anchor, survived a process kill and
+resumed from the signed durable journal. A same-head response
+preserved its pending vote. An unavailable endpoint and a stale
+responder produced read-only rounds; a later caught-up responder
+was accepted. Retirement stopped the listener, and the poller
+excluded retired configured peers before connecting. The separate
+one-shot protocol domain was refused by the repeated listener.
+No live world, control or runtime records were created. Strict
+all-target/all-feature CLI Clippy, formatting, workflow-policy and
+release-version checks passed locally.
+
 The CFT threat model, bounded history and trusted profile/disk
 assumptions remain unchanged. An OS-level key/profile clone or complete
 disk rollback is outside those assumptions. This application binding
 of Noise requires independent protocol review before production use.
-There is no automatic proposer selection, persistent dissemination
-or recovery service, canonical Minecraft publication, or game authorization.
+There is no automatic proposer selection, indefinite managed daemon,
+canonical Minecraft publication, or game authorization.
 The explicit collection, recovery, synchronization and discovery commands
 do not establish the globally latest head. An unavailable majority or split
 pending votes can halt decisions. A signed vote is not a lease, an

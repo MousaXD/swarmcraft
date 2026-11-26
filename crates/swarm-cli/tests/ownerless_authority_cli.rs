@@ -1920,6 +1920,295 @@ fn encrypted_head_discovery_accepts_surviving_certificate_with_silent_optional_p
     f.assert_no_live_storage();
 }
 
+impl Fixture {
+    fn reconciliation_serve(
+        &self,
+        responder: usize,
+        requester: usize,
+        anchor: &str,
+        bind: &str,
+        sessions: u32,
+    ) -> Command {
+        cmd(
+            &self.profiles[responder],
+            &[
+                "decision",
+                "serve-heads",
+                "--expected-world",
+                &self.world,
+                "--expected-anchor",
+                anchor,
+                "--from",
+                &self.identities[requester].peer_id().to_string(),
+                "--bind",
+                bind,
+                "--max-sessions",
+                &sessions.to_string(),
+                "--run-seconds",
+                "45",
+                "--confirm",
+            ],
+        )
+    }
+
+    fn reconciliation_listener(
+        &self,
+        responder: usize,
+        requester: usize,
+        anchor: &str,
+        bind: &str,
+        sessions: u32,
+    ) -> ObservationListener {
+        use std::io::BufRead;
+        let child = self
+            .reconciliation_serve(responder, requester, anchor, bind, sessions)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut listener = ObservationListener { child: Some(child), address: String::new() };
+        let mut line = String::new();
+        std::io::BufReader::new(listener.child.as_mut().unwrap().stdout.as_mut().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        assert!(!line.is_empty(), "reconciliation listener failed before readiness");
+        let ready: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(ready["classification"], "ownerless_reference_reconciliation_listener");
+        assert_eq!(ready["anchor"], anchor);
+        assert_eq!(ready["validator"], self.identities[responder].peer_id().to_string());
+        assert_eq!(ready["runtime_activation"], false);
+        listener.address = ready["address"].as_str().unwrap().to_owned();
+        listener
+    }
+
+    fn reconcile_cmd(&self, requester: usize, anchor: &str, peers: &[(usize, &str)], rounds: u32) -> Command {
+        let mut command = cmd(
+            &self.profiles[requester],
+            &[
+                "decision",
+                "reconcile-heads",
+                "--expected-world",
+                &self.world,
+                "--expected-anchor",
+                anchor,
+                "--rounds",
+                &rounds.to_string(),
+                "--interval-seconds",
+                "4",
+                "--run-seconds",
+                "40",
+                "--confirm",
+            ],
+        );
+        for (peer, addr) in peers {
+            command.args(["--peer", &format!("{}@{}", self.identities[*peer].peer_id(), addr)]);
+        }
+        command
+    }
+
+    fn check_reconciliation_round(&self, result: &Value, base: &str, head: &str, round: u32, observed: bool) {
+        assert_eq!(result["classification"], "ownerless_reference_reconciliation_round");
+        assert_eq!(result["round"], round);
+        assert_eq!(result["anchor"], self.initial_head);
+        assert_eq!(result["base"], base);
+        assert_eq!(result["head"], head);
+        assert_eq!(result["observed_certified_head"], observed);
+        assert_eq!(result["advanced"], base != head);
+        for key in [
+            "live_quorum_verified",
+            "globally_latest_verified",
+            "runtime_activation",
+            "canonical_authority",
+            "write_authority",
+            "player_admission",
+            "worker_admission",
+            "v1_canonical_world_created",
+        ] {
+            assert_eq!(result[key], false, "{key}");
+        }
+    }
+}
+
+fn next_reconciliation_line(reader: &mut impl std::io::BufRead) -> Value {
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    assert!(!line.is_empty(), "reconciliation process ended before its next report");
+    serde_json::from_str(&line).unwrap()
+}
+
+fn reconciliation_reports(output: Output) -> Vec<Value> {
+    String::from_utf8(success(output)).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect()
+}
+
+fn check_listener_finished(output: Output, served: u32, refused: u32) {
+    let result = json(output);
+    assert_eq!(result["classification"], "ownerless_reference_reconciliation_listener_finished");
+    assert_eq!(result["attempted"], served + refused);
+    assert_eq!(result["served"], served);
+    assert_eq!(result["rejected"], refused);
+    assert_eq!(result["durable_remote_acceptance_verified"], false);
+    assert_eq!(result["runtime_activation"], false);
+}
+
+#[test]
+fn persistent_head_reconciliation_advances_dynamic_base_and_resumes_after_kill() {
+    use std::io::BufReader;
+    let f = Fixture::new();
+    let state1 = f.state("reconcile-first.bin", b"persistent reconciliation first state");
+    let p1 = f.propose(&f.genesis, &f.initial_head, "reconcile-first.json", &["--checkpoint", s(&state1)]);
+    let a = f.vote(0, &f.initial_head, &p1, &state1, "reconcile-first-a.json");
+    let b = f.vote(1, &f.initial_head, &p1, &state1, "reconcile-first-b.json");
+    let h1 = f.certified(&f.genesis, &f.initial_head, &p1, &[&a, &b], "reconcile-h1.json");
+    f.sync(&[0, 1], &h1, &p1.1, &state1, 1, 1);
+    let state2 = f.state("reconcile-second.bin", b"persistent reconciliation second state");
+    let p2 = f.propose(&h1, &p1.1, "reconcile-second.json", &["--checkpoint", s(&state2)]);
+    let a = f.vote(0, &p1.1, &p2, &state2, "reconcile-second-a.json");
+    let b = f.vote(1, &p1.1, &p2, &state2, "reconcile-second-b.json");
+    let h2 = f.certified(&h1, &p1.1, &p2, &[&a, &b], "reconcile-h2.json");
+    let founder = fs::read(f.journal(0)).unwrap();
+    let listener = f.reconciliation_listener(1, 2, &f.initial_head, "127.0.0.1:0", 4);
+    let child = f
+        .reconcile_cmd(2, &f.initial_head, &[(1, &listener.address)], 3)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut runner = ObservationListener { child: Some(child), address: String::new() };
+    let mut reader = BufReader::new(runner.child.as_mut().unwrap().stdout.take().unwrap());
+    let first = next_reconciliation_line(&mut reader);
+    f.check_reconciliation_round(&first, &f.initial_head, &p1.1, 1, true);
+    f.sync(&[1], &h2, &p2.1, &state2, 2, 1);
+    let second = next_reconciliation_line(&mut reader);
+    f.check_reconciliation_round(&second, &p1.1, &p2.1, 2, true);
+    // Crash the requester after the second durable publication. A restart
+    // has the original anchor, not a new target or saved network cursor.
+    runner.child.as_mut().unwrap().kill().unwrap();
+    assert!(!runner.finish().status.success());
+    let copy = f.path("reconcile-crash-copy.bin");
+    success(invoke(
+        &f.profiles[2],
+        &["recovery-copy", "--expected-world", &f.world, "--expected-head", &p2.1, "--output", s(&copy)],
+    ));
+    assert_eq!(fs::read(copy).unwrap(), fs::read(&state2).unwrap());
+    let next = f.propose(&h2, &p2.1, "reconcile-pending.json", &["--recover"]);
+    f.vote(2, &p2.1, &next, &state2, "reconcile-pending-vote.json");
+    let committed = fs::read(f.journal(2)).unwrap();
+    let responder = fs::read(f.journal(1)).unwrap();
+    // Existing one-shot transport is domain-separated and cannot
+    // accidentally be treated as a service request.
+    rejected(f.pull_head(2, &p2.1, &[(1, &listener.address)]), "no verified certified head response");
+    let reports =
+        reconciliation_reports(f.reconcile_cmd(2, &f.initial_head, &[(1, &listener.address)], 1).output().unwrap());
+    assert_eq!(reports.len(), 2);
+    f.check_reconciliation_round(&reports[0], &p2.1, &p2.1, 1, true);
+    assert_eq!(reports[0]["pending_proposal"], next.1);
+    assert_eq!(reports[1]["completed_rounds"], 1);
+    assert_eq!(reports[1]["all_rounds_completed"], true);
+    check_listener_finished(listener.finish(), 3, 1);
+    assert_eq!(fs::read(f.journal(2)).unwrap(), committed);
+    assert_eq!(fs::read(f.journal(1)).unwrap(), responder);
+    assert_eq!(fs::read(f.journal(0)).unwrap(), founder);
+    f.assert_no_live_storage();
+}
+
+#[test]
+fn persistent_head_reconciliation_retries_unavailable_and_stale_responder() {
+    use std::{io::BufReader, net::TcpListener};
+    let f = Fixture::new();
+    let p = f.propose(&f.genesis, &f.initial_head, "reconcile-recover.json", &["--recover"]);
+    let a = f.vote(0, &f.initial_head, &p, &f.initial, "reconcile-recover-a.json");
+    let b = f.vote(1, &f.initial_head, &p, &f.initial, "reconcile-recover-b.json");
+    let h = f.certified(&f.genesis, &f.initial_head, &p, &[&a, &b], "reconcile-recover-history.json");
+    f.sync(&[2], &h, &p.1, &f.initial, 1, 2);
+    let next = f.propose(&h, &p.1, "reconcile-retry-pending.json", &["--recover"]);
+    f.vote(2, &p.1, &next, &f.initial, "reconcile-retry-pending-vote.json");
+    let before = fs::read(f.journal(2)).unwrap();
+    let founder = fs::read(f.journal(0)).unwrap();
+    let unused = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = unused.local_addr().unwrap().to_string();
+    drop(unused);
+    let child = f
+        .reconcile_cmd(2, &f.initial_head, &[(1, &address)], 3)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut runner = ObservationListener { child: Some(child), address: String::new() };
+    let mut reader = BufReader::new(runner.child.as_mut().unwrap().stdout.take().unwrap());
+    let first = next_reconciliation_line(&mut reader);
+    f.check_reconciliation_round(&first, &p.1, &p.1, 1, false);
+    assert_eq!(first["pending_proposal"], next.1);
+    assert_eq!(first["unavailable"], serde_json::json!([f.identities[1].peer_id().to_string()]));
+    let listener = f.reconciliation_listener(1, 2, &f.initial_head, &address, 2);
+    let second = next_reconciliation_line(&mut reader);
+    f.check_reconciliation_round(&second, &p.1, &p.1, 2, false);
+    assert_eq!(fs::read(f.journal(2)).unwrap(), before);
+    // The server has not yet accepted the client's base; it must not
+    // send its older head. Once independently caught up it can serve.
+    f.sync(&[1], &h, &p.1, &f.initial, 1, 2);
+    let third = next_reconciliation_line(&mut reader);
+    f.check_reconciliation_round(&third, &p.1, &p.1, 3, true);
+    assert_eq!(third["pending_proposal"], next.1);
+    let finished = next_reconciliation_line(&mut reader);
+    assert_eq!(finished["all_rounds_completed"], true);
+    assert_eq!(finished["completed_rounds"], 3);
+    success(runner.finish());
+    check_listener_finished(listener.finish(), 1, 1);
+    assert_eq!(fs::read(f.journal(2)).unwrap(), before);
+    assert_eq!(fs::read(f.journal(0)).unwrap(), founder);
+    f.assert_no_live_storage();
+}
+
+#[test]
+fn persistent_head_reconciliation_stops_on_retirement_and_excludes_removed_peers() {
+    let f = Fixture::new();
+    let listener = f.reconciliation_listener(1, 2, &f.initial_head, "127.0.0.1:0", 3);
+    let reports =
+        reconciliation_reports(f.reconcile_cmd(2, &f.initial_head, &[(1, &listener.address)], 1).output().unwrap());
+    f.check_reconciliation_round(&reports[0], &f.initial_head, &f.initial_head, 1, true);
+    let keys: Vec<_> = [0, 1, 3].iter().map(|&i| hex::encode(f.identities[i].public_key())).collect();
+    let joint = f.propose(
+        &f.genesis,
+        &f.initial_head,
+        "reconcile-retirement.json",
+        &["--validator-key", &keys[0], "--validator-key", &keys[1], "--validator-key", &keys[2]],
+    );
+    let a = f.vote(0, &f.initial_head, &joint, &f.initial, "reconcile-retirement-a.json");
+    let b = f.vote(1, &f.initial_head, &joint, &f.initial, "reconcile-retirement-b.json");
+    let c = f.vote(3, &f.initial_head, &joint, &f.initial, "reconcile-retirement-c.json");
+    let h = f.certified(&f.genesis, &f.initial_head, &joint, &[&a, &b, &c], "reconcile-retirement-history.json");
+    f.sync(&[0, 1, 3], &h, &joint.1, &f.initial, 1, 2);
+    let stale = fs::read(f.journal(2)).unwrap();
+    let reports =
+        reconciliation_reports(f.reconcile_cmd(2, &f.initial_head, &[(1, &listener.address)], 1).output().unwrap());
+    f.check_reconciliation_round(&reports[0], &f.initial_head, &f.initial_head, 1, false);
+    rejected(listener.finish(), "retired or not in target roster");
+    assert_eq!(fs::read(f.journal(2)).unwrap(), stale);
+    rejected(
+        f.reconciliation_serve(1, 2, &f.initial_head, "127.0.0.1:0", 1).output().unwrap(),
+        "retired or not in target roster",
+    );
+    let current = fs::read(f.journal(1)).unwrap();
+    let reports =
+        reconciliation_reports(f.reconcile_cmd(1, &f.initial_head, &[(2, "127.0.0.1:1")], 1).output().unwrap());
+    f.check_reconciliation_round(&reports[0], &joint.1, &joint.1, 1, false);
+    assert_eq!(reports[0]["excluded"], serde_json::json!([f.identities[2].peer_id().to_string()]));
+    assert_eq!(reports[0]["unavailable"], serde_json::json!([]));
+    assert_eq!(fs::read(f.journal(1)).unwrap(), current);
+    // An entrant not in the pinned anchor requires a new explicit
+    // common anchor rather than a silent expansion of peer authority.
+    rejected(f.reconcile_cmd(1, &f.initial_head, &[(3, "127.0.0.1:1")], 1).output().unwrap(), "current validator");
+    rejected(
+        f.reconcile_cmd(1, &f.initial_head, &[(0, "127.0.0.1:1")], 0).output().unwrap(),
+        "invalid reconciliation bounds",
+    );
+    rejected(
+        f.reconciliation_serve(1, 0, &f.initial_head, "127.0.0.1:0", 129).output().unwrap(),
+        "invalid reconciliation bounds",
+    );
+    f.assert_no_live_storage();
+}
+
 impl ObservationListener {
     fn finish(mut self) -> Output {
         self.child.take().unwrap().wait_with_output().unwrap()

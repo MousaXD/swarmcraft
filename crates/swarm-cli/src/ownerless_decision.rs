@@ -85,6 +85,17 @@ pub struct DiscoveryReview {
     confirm: bool,
 }
 
+#[derive(Debug, Args)]
+pub struct ReconciliationReview {
+    #[arg(long)]
+    expected_world: OwnerlessWorldIdV1,
+    /// Common certified ancestor, pinned independently on both profiles.
+    #[arg(long)]
+    expected_anchor: Hash32,
+    #[arg(long)]
+    confirm: bool,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum DecisionCommand {
     /// Serve exactly one explicitly approved remote vote request.
@@ -163,6 +174,32 @@ pub enum DecisionCommand {
         review: DiscoveryReview,
         #[arg(long = "peer", required = true)]
         peers: Vec<String>,
+    },
+    /// Serve repeated authenticated reconciliation requests from one explicitly pinned validator.
+    ServeHeads {
+        #[command(flatten)]
+        review: ReconciliationReview,
+        #[arg(long)]
+        from: PeerId,
+        #[arg(long)]
+        bind: SocketAddr,
+        #[arg(long, default_value_t = 16)]
+        max_sessions: u32,
+        #[arg(long, default_value_t = 120)]
+        run_seconds: u64,
+    },
+    /// Poll explicitly configured validators and reconcile certified descendants; never vote.
+    ReconcileHeads {
+        #[command(flatten)]
+        review: ReconciliationReview,
+        #[arg(long = "peer", required = true)]
+        peers: Vec<String>,
+        #[arg(long, default_value_t = 3)]
+        rounds: u32,
+        #[arg(long, default_value_t = 2)]
+        interval_seconds: u64,
+        #[arg(long, default_value_t = 120)]
+        run_seconds: u64,
     },
 }
 
@@ -742,5 +779,11 @@ pub(super) fn run(paths: &DataPaths, command: DecisionCommand) -> Result<()> {
         DecisionCommand::Recover { review, peers } => recovery::recover(paths, &review, &peers),
         DecisionCommand::ServeHead { review, from, bind } => discovery::serve(paths, &review, from, bind),
         DecisionCommand::PullHead { review, peers } => discovery::pull(paths, &review, &peers),
+        DecisionCommand::ServeHeads { review, from, bind, max_sessions, run_seconds } => {
+            discovery::serve_heads(paths, &review, from, bind, max_sessions, run_seconds)
+        }
+        DecisionCommand::ReconcileHeads { review, peers, rounds, interval_seconds, run_seconds } => {
+            discovery::reconcile_heads(paths, &review, &peers, rounds, interval_seconds, run_seconds)
+        }
     }
 }
