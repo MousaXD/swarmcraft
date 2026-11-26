@@ -104,7 +104,7 @@ mod linux {
         fs::{self, File, OpenOptions},
         path::Path,
     };
-    use swarm_cli::runtime_process_guard::ProbeRecoveryPin;
+    use swarm_cli::{exclusive_turn_runtime_package::StagedPackagePin, runtime_process_guard::ProbeRecoveryPin};
     use swarm_core::{random_nonce, PeerIdentity};
     use swarm_protocol::{ExclusiveTurnCheckpointV1, PeerId};
 
@@ -181,6 +181,7 @@ mod linux {
         // clear path, including by an older decoder.
         JavaProbeMayHaveSpawnedV1,
         JavaProbeMayHaveSpawnedV2(ProbeRecoveryPin),
+        JavaProbeMayHaveSpawnedV3 { recovery: ProbeRecoveryPin, stage: StagedPackagePin },
     }
 
     impl IntentKind {
@@ -189,11 +190,38 @@ mod linux {
                 Self::UnlaunchedNoProcessV1 => "unlaunched_no_process_v1",
                 Self::JavaProbeMayHaveSpawnedV1 => "java_probe_may_have_spawned_v1",
                 Self::JavaProbeMayHaveSpawnedV2(_) => "java_probe_may_have_spawned_v2",
+                Self::JavaProbeMayHaveSpawnedV3 { .. } => "java_probe_may_have_spawned_v3",
             }
         }
 
         fn is_probe(&self) -> bool {
             !matches!(self, Self::UnlaunchedNoProcessV1)
+        }
+
+        fn recovery(&self) -> Option<&ProbeRecoveryPin> {
+            match self {
+                Self::JavaProbeMayHaveSpawnedV2(pin) | Self::JavaProbeMayHaveSpawnedV3 { recovery: pin, .. } => {
+                    Some(pin)
+                }
+                _ => None,
+            }
+        }
+
+        fn stage(&self) -> Option<&StagedPackagePin> {
+            match self {
+                Self::JavaProbeMayHaveSpawnedV3 { stage, .. } => Some(stage),
+                _ => None,
+            }
+        }
+
+        fn validate(&self, consent: &Consent) -> Result<()> {
+            if let Some(pin) = self.recovery() {
+                pin.verify_budget(consent.heap_mib, consent.cpu_millicores, consent.revision)?;
+            }
+            if let Some(stage) = self.stage() {
+                stage.verify_compatibility(consent.scope.compatibility)?;
+            }
+            Ok(())
         }
     }
 
@@ -237,9 +265,7 @@ mod linux {
             if let Some(intent) = &self.intent {
                 ensure!(intent.nonce != [0; 32], "invalid runtime intent nonce");
                 intent.consent.validate(world, peer)?;
-                if let IntentKind::JavaProbeMayHaveSpawnedV2(pin) = &intent.kind {
-                    pin.verify_budget(intent.consent.heap_mib, intent.consent.cpu_millicores, intent.consent.revision)?;
-                }
+                intent.kind.validate(&intent.consent)?;
                 ensure!(intent.consent.revision < self.revision, "runtime intent precedes its consent");
                 ensure!(
                     self.consent.as_ref().is_none_or(|consent| consent == &intent.consent),
@@ -305,9 +331,7 @@ mod linux {
         ) -> Result<Hash32> {
             let consent = self.unlaunched_consent(scope, expected, expected_intent)?;
             ensure!(kind.is_probe(), "cannot begin a non-probe intent");
-            if let IntentKind::JavaProbeMayHaveSpawnedV2(pin) = &kind {
-                pin.verify_budget(consent.heap_mib, consent.cpu_millicores, consent.revision)?;
-            }
+            kind.validate(consent)?;
             self.next(expected)?;
             let intent = self.intent.as_mut().context("runtime intent disappeared")?;
             intent.kind = kind;
@@ -345,7 +369,8 @@ mod linux {
                 "runtime intent differs from exact recovery pin"
             );
             match &intent.kind {
-                IntentKind::JavaProbeMayHaveSpawnedV2(pin) => Ok(pin),
+                IntentKind::JavaProbeMayHaveSpawnedV2(pin)
+                | IntentKind::JavaProbeMayHaveSpawnedV3 { recovery: pin, .. } => Ok(pin),
                 IntentKind::JavaProbeMayHaveSpawnedV1 => {
                     anyhow::bail!("legacy possibly-spawned probe lacks a signed kernel recovery pin; recovery refused")
                 }
@@ -471,9 +496,51 @@ mod linux {
             state.reserve(&scope, 1).unwrap();
             let unlaunched = state.intent.as_ref().unwrap().id().unwrap();
             assert!(state.recovery_pin(&scope, 2, unlaunched).is_err());
+            let mut staged_state = state.clone();
+            let stage: StagedPackagePin = serde_json::from_value(serde_json::json!({
+                "name": format!("runtime-stage-{}", "ab".repeat(32)), "device": 1, "inode": 2,
+                "compatibility": scope.compatibility
+            }))
+            .unwrap();
+            let wrong_stage: StagedPackagePin = serde_json::from_value(serde_json::json!({
+                "name": format!("runtime-stage-{}", "ab".repeat(32)), "device": 1, "inode": 2,
+                "compatibility": Hash32([9;32])
+            }))
+            .unwrap();
+            assert!(staged_state
+                .begin_probe(
+                    &scope,
+                    2,
+                    unlaunched,
+                    IntentKind::JavaProbeMayHaveSpawnedV3 { recovery: recovery.clone(), stage: wrong_stage }
+                )
+                .is_err());
+            let staged_probe = staged_state
+                .begin_probe(
+                    &scope,
+                    2,
+                    unlaunched,
+                    IntentKind::JavaProbeMayHaveSpawnedV3 { recovery: recovery.clone(), stage: stage.clone() },
+                )
+                .unwrap();
+            staged_state.validate(world, peer).unwrap();
+            let staged_signed = SignedState {
+                signature: identity.sign(&signing_bytes(&staged_state).unwrap()),
+                state: staged_state.clone(),
+            };
+            let staged_bytes = postcard::to_allocvec(&staged_signed).unwrap();
+            let staged_decoded: SignedState = postcard::from_bytes(&staged_bytes).unwrap();
+            assert_eq!(postcard::to_allocvec(&staged_decoded).unwrap(), staged_bytes);
+            assert_eq!(staged_decoded.state.intent.as_ref().unwrap().kind.stage(), Some(&stage));
+            assert_eq!(staged_decoded.state.recovery_pin(&scope, 3, staged_probe).unwrap(), &recovery);
+            assert!(staged_state.clear(&scope, 3, staged_probe).is_err());
+            staged_state.revoke(scope.grant, 3).unwrap();
+            staged_state.finish_recovery(&scope, 4, staged_probe).unwrap();
+            assert!(staged_state.intent.is_none() && staged_state.consent.is_none());
             let probe = state
                 .begin_probe(&scope, 2, unlaunched, IntentKind::JavaProbeMayHaveSpawnedV2(recovery.clone()))
                 .unwrap();
+            assert_ne!(probe, staged_probe);
             state.validate(world, peer).unwrap();
             let signed =
                 SignedState { signature: identity.sign(&signing_bytes(&state).unwrap()), state: state.clone() };
@@ -608,7 +675,8 @@ mod linux {
             "capacity_verified": false, "resource_enforcement_verified": false,
             "process_spawned": if intent.is_some_and(|i| i.kind.is_probe()) { serde_json::Value::Null } else { false.into() },
             "unresolved_possibly_spawned_intent": intent.is_some_and(|i| i.kind.is_probe()),
-            "kernel_recovery_pin_available": intent.is_some_and(|i| matches!(i.kind, IntentKind::JavaProbeMayHaveSpawnedV2(_))),
+            "kernel_recovery_pin_available": intent.is_some_and(|i| i.kind.recovery().is_some()),
+            "staged_generation": intent.and_then(|i| i.kind.stage()).map(StagedPackagePin::name),
             "save_barrier_verified": false, "canonical_authority": false, "write_authority": false,
             "runtime_activation": false, "player_admission": false, "minecraft_gameplay_verified": false,
         }))
@@ -715,6 +783,7 @@ mod linux {
                 let mut admission = swarm_cli::exclusive_turn_process_probe::ProbeAdmission::prepare(
                     paths,
                     &package,
+                    &store.dir,
                     scope.compatibility,
                     consent.heap_mib,
                     consent.cpu_millicores,
@@ -729,7 +798,10 @@ mod linux {
                     &scope,
                     expected_revision,
                     expected_intent,
-                    IntentKind::JavaProbeMayHaveSpawnedV2(recovery_pin.clone()),
+                    IntentKind::JavaProbeMayHaveSpawnedV3 {
+                        recovery: recovery_pin.clone(),
+                        stage: admission.staged_pin().clone(),
+                    },
                 )?;
                 // Publish and fsync the possibly-spawned state BEFORE any
                 // child or its ownership record. Hold consent lock across
@@ -750,6 +822,7 @@ mod linux {
                 current.finish_probe(&scope, revision, probe)?;
                 persist(&store.dir, &store.identity, &current, true)?;
                 let cleanup = admission.cleanup_completed_leaf(&recovery_pin);
+                let staged_cleanup = admission.cleanup_completed_stage();
                 drop(lock);
                 drop(admission);
                 let mut result = report(&current, Some(&scope))?;
@@ -762,6 +835,10 @@ mod linux {
                 if let Err(error) = cleanup {
                     result["empty_cgroup_cleanup_error"] = format!("{error:#}").into();
                 }
+                result["staged_generation_retired"] = staged_cleanup.is_ok().into();
+                if let Err(error) = staged_cleanup {
+                    result["staged_generation_cleanup_error"] = format!("{error:#}").into();
+                }
                 result["java_probe"] = serde_json::to_value(evidence)?;
                 print_document(&result)
             }
@@ -773,6 +850,8 @@ mod linux {
                 let mut state =
                     load(&store.dir, head.world(), &store.identity)?.context("local runtime intent state is absent")?;
                 let pin = state.recovery_pin(&scope, expected_revision, expected_intent)?.clone();
+                let retained_stage =
+                    state.intent.as_ref().and_then(|i| i.kind.stage()).map(|pin| pin.name().to_owned());
                 let recovery = swarm_cli::exclusive_turn_process_probe::ProbeRecovery::retire(paths, &store.dir, &pin)?;
                 state.finish_recovery(&scope, expected_revision, expected_intent)?;
                 persist(&store.dir, &store.identity, &state, true)?;
@@ -786,6 +865,9 @@ mod linux {
                 result["process_and_descendants_quiescent"] = true.into();
                 result["prior_process_spawn_verified"] = false.into();
                 result["qualification_succeeded"] = false.into();
+                // A recovered stage may have been mutated or substituted.
+                // Never delete/reuse it solely because its process is gone.
+                result["retained_stage_for_review"] = serde_json::to_value(retained_stage)?;
                 print_document(&result)
             }
             RuntimeCommand::Clear { review, expected_checkpoint, expected_revision, expected_intent } => {

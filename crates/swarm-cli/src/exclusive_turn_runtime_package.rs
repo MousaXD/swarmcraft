@@ -12,8 +12,8 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File, Metadata, OpenOptions},
-    io::Read,
-    os::unix::fs::{MetadataExt, OpenOptionsExt},
+    io::{Read, Write},
+    os::unix::fs::{symlink, DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Component, Path, PathBuf},
 };
 use swarm_protocol::{Hash32, PINNED_FABRIC_LOADER_VERSION, PINNED_MINECRAFT_VERSION};
@@ -27,6 +27,7 @@ const MINECRAFT: &str = "versions/26.1.2/server-26.1.2.jar";
 const LOADER: &str = "fabric-libraries/fabric-loader-0.19.3.jar";
 const BRIDGE: &str = "mods/swarmcraft-fabric.jar";
 const PROFILE: &str = "fabric-profile.json";
+const STAGE_PREFIX: &str = "runtime-stage-";
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
 enum Entry {
@@ -80,6 +81,210 @@ pub struct RuntimePackagePin {
     pub fabric_libraries: usize,
     pub java_version: String,
     pub embedded_fabric_api_version: String,
+}
+
+/// A local, never-reused generation identity, included in a signed intent
+/// before a child may execute from that generation. The byte fingerprint
+/// remains the same across staging and devices; these inode pins are local.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StagedPackagePin {
+    name: String,
+    device: u64,
+    inode: u64,
+    compatibility: Hash32,
+}
+
+impl StagedPackagePin {
+    pub fn verify_compatibility(&self, expected: Hash32) -> Result<()> {
+        let suffix = self.name.strip_prefix(STAGE_PREFIX).context("invalid staged package name")?;
+        ensure!(
+            suffix.len() == 64
+                && suffix.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                && self.inode != 0
+                && self.compatibility == expected
+                && expected != Hash32::default(),
+            "invalid staged package identity or compatibility"
+        );
+        Ok(())
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn verify_root(&self, root: &Path) -> Result<()> {
+        validate_ancestors(root)?;
+        let meta = fs::symlink_metadata(root)?;
+        ensure!(
+            root.file_name().and_then(|n| n.to_str()) == Some(self.name.as_str())
+                && meta.is_dir()
+                && meta.uid() == uid()
+                && meta.dev() == self.device
+                && meta.ino() == self.inode,
+            "staged package root was replaced or moved"
+        );
+        Ok(())
+    }
+}
+
+/// A private generation copied through checked file descriptors. Read-only
+/// permissions protect against accidental writes, not malicious same-UID
+/// chmod/replacement. The signed process fence protects interrupted stages.
+pub struct StagedRuntimePackage {
+    root: PathBuf,
+    pin: StagedPackagePin,
+    inventory: Inventory,
+    pub java_version: String,
+    retained: bool,
+}
+
+struct StageDirectory {
+    root: PathBuf,
+    pin: StagedPackagePin,
+    keep: bool,
+}
+
+impl StageDirectory {
+    fn create(parent: &Path, compatibility: Hash32) -> Result<Self> {
+        let parent = private_stage_parent(parent)?;
+        let name = format!("{STAGE_PREFIX}{}", hex::encode(swarm_core::random_nonce()));
+        let root = parent.join(&name);
+        fs::DirBuilder::new().mode(0o700).create(&root)?;
+        let meta = fs::symlink_metadata(&root)?;
+        let pin = StagedPackagePin { name, device: meta.dev(), inode: meta.ino(), compatibility };
+        let guard = Self { root, pin, keep: false };
+        File::open(&parent)?.sync_all()?;
+        Ok(guard)
+    }
+}
+
+impl Drop for StageDirectory {
+    fn drop(&mut self) {
+        if !self.keep {
+            let _ = remove_stage(&self.root, &self.pin);
+        }
+    }
+}
+
+fn private_stage_parent(path: &Path) -> Result<PathBuf> {
+    let path = std::path::absolute(path)?;
+    validate_ancestors(&path)?;
+    let meta = fs::symlink_metadata(&path)?;
+    ensure!(
+        meta.is_dir() && meta.uid() == uid() && meta.mode() & 0o077 == 0,
+        "runtime stage requires an owner-only reference directory"
+    );
+    Ok(path.canonicalize()?)
+}
+
+fn remove_stage(root: &Path, pin: &StagedPackagePin) -> Result<()> {
+    pin.verify_root(root)?;
+    // No following links. Never chmod a regular file (it could have acquired
+    // an unexpected hardlink), or walk through an external legal link.
+    for item in walkdir::WalkDir::new(root).follow_links(false).max_depth(32) {
+        let item = item?;
+        ensure!(item.depth() < 32, "unexpected deep staged package");
+        if item.file_type().is_dir() {
+            let meta = fs::symlink_metadata(item.path())?;
+            ensure!(meta.is_dir() && meta.uid() == uid(), "unsafe staged directory cleanup");
+            fs::set_permissions(item.path(), fs::Permissions::from_mode(0o700))?;
+        }
+    }
+    fs::remove_dir_all(root)?;
+    File::open(root.parent().context("staged package parent missing")?)?.sync_all()?;
+    Ok(())
+}
+
+impl StagedRuntimePackage {
+    pub fn stage(source: &Path, parent: &Path, expected: Hash32) -> Result<Self> {
+        let source = package_root(source)?;
+        let parent = private_stage_parent(parent)?;
+        ensure!(!parent.starts_with(&source), "runtime stage cannot be created inside its source package");
+        let inventory = scan(&source)?;
+        let reviewed = inspect_inventory(&source, &inventory)?;
+        ensure!(reviewed.fingerprint == expected, "staged source differs from signed runtime package compatibility");
+        let mut directory = StageDirectory::create(&parent, expected)?;
+        copy_inventory(&source, &inventory, &directory.root)?;
+        inventory.stable(&source)?;
+        let staged = scan(&directory.root)?;
+        let pin = inspect_inventory(&directory.root, &staged)?;
+        ensure!(
+            staged.entries == inventory.entries && pin.fingerprint == expected,
+            "staged runtime package differs from reviewed source"
+        );
+        verify_sealed(&staged)?;
+        directory.pin.verify_root(&directory.root)?;
+        let result = Self {
+            root: directory.root.clone(),
+            pin: directory.pin.clone(),
+            inventory: staged,
+            java_version: pin.java_version,
+            retained: false,
+        };
+        directory.keep = true;
+        Ok(result)
+    }
+
+    pub fn pin(&self) -> &StagedPackagePin {
+        &self.pin
+    }
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Deterministic class-resolution probe inputs, not a Fabric launch
+    /// command line. Only inventoried JARs, never ambient classpath or cache.
+    pub fn probe_classpath(&self) -> Vec<&str> {
+        self.inventory
+            .entries
+            .iter()
+            .filter_map(|(name, entry)| {
+                (matches!(entry, Entry::File { .. })
+                    && (name == MINECRAFT
+                        || name == BRIDGE
+                        || ((name.starts_with("libraries/") || name.starts_with("fabric-libraries/"))
+                            && name.ends_with(".jar"))))
+                .then_some(name.as_str())
+            })
+            .collect()
+    }
+
+    pub fn verify_unchanged(&self) -> Result<()> {
+        self.pin.verify_root(&self.root)?;
+        self.inventory.stable(&self.root)?;
+        verify_sealed(&self.inventory)
+    }
+
+    pub fn reverify(&self) -> Result<()> {
+        self.verify_unchanged()?;
+        let reviewed = inspect_runtime_package(&self.root)?;
+        ensure!(
+            reviewed.fingerprint == self.pin.compatibility && reviewed.java_version == self.java_version,
+            "staged runtime package bytes differ from signed compatibility"
+        );
+        self.verify_unchanged()
+    }
+
+    /// Keep through all possible spawn/error paths. Only the successful
+    /// quiescent completion caller may retire this copy automatically.
+    pub fn retain_for_possible_spawn(&mut self) {
+        self.retained = true;
+    }
+
+    pub fn retire_completed(&mut self) -> Result<()> {
+        self.verify_unchanged()?;
+        remove_stage(&self.root, &self.pin)?;
+        self.retained = true;
+        Ok(())
+    }
+}
+
+impl Drop for StagedRuntimePackage {
+    fn drop(&mut self) {
+        if !self.retained {
+            let _ = remove_stage(&self.root, &self.pin);
+        }
+    }
 }
 
 fn token(value: &str) -> bool {
@@ -217,6 +422,78 @@ impl Inventory {
         ensure!(count == self.stamps.len(), "runtime package entries changed during review");
         Ok(())
     }
+}
+
+fn copy_inventory(source: &Path, inventory: &Inventory, destination: &Path) -> Result<()> {
+    let mut buffer = vec![0u8; 64 * 1024];
+    for (name, entry) in &inventory.entries {
+        let from = source.join(name);
+        let to = destination.join(name);
+        let stamp = inventory.stamps.get(name).context("runtime inventory identity missing")?;
+        ensure!(Stamp::new(&fs::symlink_metadata(&from)?) == *stamp, "runtime source changed before staging");
+        match entry {
+            Entry::Directory => fs::DirBuilder::new().mode(0o700).create(&to)?,
+            Entry::File { bytes, executable, sha256 } => {
+                let mut input = open_checked(&from, stamp)?;
+                let mut output = OpenOptions::new().create_new(true).write(true).mode(0o600).open(&to)?;
+                let mut hash = Sha256::new();
+                let mut copied = 0u64;
+                loop {
+                    let n = input.read(&mut buffer)?;
+                    if n == 0 {
+                        break;
+                    }
+                    copied += n as u64;
+                    ensure!(copied <= *bytes, "runtime source grew during staging");
+                    hash.update(&buffer[..n]);
+                    output.write_all(&buffer[..n])?;
+                }
+                ensure!(
+                    copied == *bytes
+                        && Hash32(hash.finalize().into()) == *sha256
+                        && Stamp::new(&input.metadata()?) == *stamp,
+                    "runtime source changed during staging"
+                );
+                output.set_permissions(fs::Permissions::from_mode(0o400 | executable))?;
+                output.sync_all()?;
+            }
+            Entry::LegalLink { target } => {
+                ensure!(fs::read_link(&from)? == Path::new(target), "runtime legal link changed during staging");
+                symlink(target, &to)?;
+            }
+        }
+    }
+    // Seal children before parents and synchronize the exact copied tree.
+    // The root remains private even when original executable bits include
+    // group/other execute. No original writable permission is retained.
+    for (name, entry) in inventory.entries.iter().rev() {
+        if matches!(entry, Entry::Directory) {
+            let file = File::open(destination.join(name))?;
+            file.set_permissions(fs::Permissions::from_mode(0o500))?;
+            file.sync_all()?;
+        }
+    }
+    let root = File::open(destination)?;
+    root.set_permissions(fs::Permissions::from_mode(0o500))?;
+    root.sync_all()?;
+    File::open(destination.parent().context("runtime stage parent missing")?)?.sync_all()?;
+    Ok(())
+}
+
+fn verify_sealed(inventory: &Inventory) -> Result<()> {
+    ensure!(
+        inventory.stamps.get("").context("staged root missing")?.mode & 0o7777 == 0o500,
+        "staged root is not read-only"
+    );
+    for (name, entry) in &inventory.entries {
+        let mode = inventory.stamps.get(name).context("staged entry missing")?.mode & 0o7777;
+        match entry {
+            Entry::Directory => ensure!(mode == 0o500, "staged directory is not read-only"),
+            Entry::File { executable, .. } => ensure!(mode == 0o400 | executable, "staged file is not read-only"),
+            Entry::LegalLink { .. } => {}
+        }
+    }
+    Ok(())
 }
 
 fn hash_text(value: &str) -> Result<Hash32> {
@@ -372,15 +649,23 @@ struct ApiMetadata {
     schema_version: u32,
 }
 
-pub fn inspect_runtime_package(package: &Path) -> Result<RuntimePackagePin> {
+fn package_root(package: &Path) -> Result<PathBuf> {
     let absolute = std::path::absolute(package)?;
     ensure!(!absolute.components().any(|c| c == Component::ParentDir), "unsafe runtime package traversal");
     validate_ancestors(&absolute)?;
-    let root: PathBuf = absolute.canonicalize()?;
+    Ok(absolute.canonicalize()?)
+}
+
+pub fn inspect_runtime_package(package: &Path) -> Result<RuntimePackagePin> {
+    let root = package_root(package)?;
     let inventory = scan(&root)?;
-    let minecraft = inventory.read(&root, MINECRAFT, MAX_CORE_JAR_BYTES)?;
-    let loader = inventory.read(&root, LOADER, MAX_CORE_JAR_BYTES)?;
-    let bridge = inventory.read(&root, BRIDGE, MAX_CORE_JAR_BYTES)?;
+    inspect_inventory(&root, &inventory)
+}
+
+fn inspect_inventory(root: &Path, inventory: &Inventory) -> Result<RuntimePackagePin> {
+    let minecraft = inventory.read(root, MINECRAFT, MAX_CORE_JAR_BYTES)?;
+    let loader = inventory.read(root, LOADER, MAX_CORE_JAR_BYTES)?;
+    let bridge = inventory.read(root, BRIDGE, MAX_CORE_JAR_BYTES)?;
     let core = inspect_core_runtime(&minecraft, &loader, &bridge)?;
     let bridge_meta: BridgeMetadata = serde_json::from_slice(&read_zip_entry(&bridge, "fabric.mod.json")?)?;
     ensure!(bridge_meta.jars.len() == 1, "package requires the single embedded Fabric API JAR");
@@ -395,7 +680,7 @@ pub fn inspect_runtime_package(package: &Path) -> Result<RuntimePackagePin> {
         api.id == "fabric-api" && api.schema_version == 1 && token(&api.version),
         "embedded Fabric API metadata differs"
     );
-    let bundler = inventory.read(&root, "server.jar", MAX_CORE_JAR_BYTES)?;
+    let bundler = inventory.read(root, "server.jar", MAX_CORE_JAR_BYTES)?;
     ensure!(
         read_zip_entry(&bundler, "META-INF/main-class")? == b"net.minecraft.server.Main",
         "Minecraft bundler entry point differs"
@@ -412,7 +697,7 @@ pub fn inspect_runtime_package(package: &Path) -> Result<RuntimePackagePin> {
         ensure!(inventory.sha(&name)? == *expected, "Minecraft dependency checksum differs: {name}");
         files.insert(name);
     }
-    let fabric = fabric_records(&inventory.read(&root, PROFILE, MAX_METADATA)?, &inventory)?;
+    let fabric = fabric_records(&inventory.read(root, PROFILE, MAX_METADATA)?, inventory)?;
     files.extend(fabric.iter().cloned());
     let expected = expected_entries(&files);
     let actual: BTreeSet<_> =
@@ -425,8 +710,8 @@ pub fn inspect_runtime_package(package: &Path) -> Result<RuntimePackagePin> {
         matches!(inventory.entries.get("java/bin/java"), Some(Entry::File { executable, .. }) if executable & 0o100 != 0),
         "Java executable is not owner-executable"
     );
-    let java_version = java_release(&inventory.read(&root, "java/release", MAX_METADATA)?)?;
-    inventory.stable(&root)?;
+    let java_version = java_release(&inventory.read(root, "java/release", MAX_METADATA)?)?;
+    inventory.stable(root)?;
     let tree_hash = Hash32::from_domain_bytes(DOMAIN, &postcard::to_allocvec(&inventory.entries)?);
     let fingerprint = Hash32::from_domain_bytes(
         DOMAIN,

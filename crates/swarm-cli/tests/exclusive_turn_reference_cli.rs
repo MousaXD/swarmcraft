@@ -1532,6 +1532,88 @@ fn runtime_package_fixture(root: &Path) {
 }
 
 #[test]
+fn staged_package_is_exact_private_and_never_reuses_a_replaced_generation() {
+    use std::os::unix::fs::MetadataExt;
+    use swarm_cli::exclusive_turn_runtime_package::{inspect_runtime_package, StagedRuntimePackage};
+    let tmp = tempfile::tempdir().unwrap();
+    let package = tmp.path().join("source");
+    let parent = tmp.path().join("reference");
+    runtime_package_fixture(&package);
+    fs::create_dir(&parent).unwrap();
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::create_dir_all(package.join("java/legal/module-a")).unwrap();
+    fs::create_dir_all(package.join("java/legal/module-b")).unwrap();
+    fs::write(package.join("java/legal/module-a/LICENSE"), b"fixture license").unwrap();
+    symlink("../module-a/LICENSE", package.join("java/legal/module-b/LICENSE")).unwrap();
+    let expected = inspect_runtime_package(&package).unwrap().fingerprint;
+    assert!(StagedRuntimePackage::stage(&package, &parent, Hash32([9; 32])).is_err());
+    assert!(fs::read_dir(&parent).unwrap().next().is_none());
+    assert!(StagedRuntimePackage::stage(&package, &package, expected).is_err());
+    let mut staged = StagedRuntimePackage::stage(&package, &parent, expected).unwrap();
+    let root = staged.root().to_owned();
+    let first = staged.pin().clone();
+    first.verify_compatibility(expected).unwrap();
+    assert!(first.verify_compatibility(Hash32([1; 32])).is_err());
+    assert_eq!(fs::metadata(&root).unwrap().mode() & 0o777, 0o500);
+    assert_eq!(fs::metadata(root.join("java/bin/java")).unwrap().mode() & 0o777, 0o500);
+    assert_eq!(fs::metadata(root.join("server.jar")).unwrap().mode() & 0o777, 0o400);
+    assert_eq!(fs::read_link(root.join("java/legal/module-b/LICENSE")).unwrap(), Path::new("../module-a/LICENSE"));
+    assert_ne!(
+        fs::metadata(package.join("java/bin/java")).unwrap().ino(),
+        fs::metadata(root.join("java/bin/java")).unwrap().ino()
+    );
+    assert_eq!(staged.probe_classpath().len(), 10);
+    assert!(!staged.probe_classpath().contains(&"server.jar"));
+    // Input bytes are independent after staging. They cannot alter the
+    // staged executable or its compatibility, even under the same UID.
+    let java = package.join("java/bin/java");
+    let original = fs::read(&java).unwrap();
+    fs::write(&java, b"changed source executable").unwrap();
+    assert!(StagedRuntimePackage::stage(&package, &parent, expected).is_err());
+    assert_eq!(fs::read(root.join("java/bin/java")).unwrap(), original);
+    staged.reverify().unwrap();
+    fs::write(&java, &original).unwrap();
+    // A private stage can still be chmod'ed by the same owner. Detect even
+    // chmod/restore and byte-restore through the original inventory stamps.
+    let staged_java = root.join("java/bin/java");
+    fs::set_permissions(&staged_java, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(&staged_java, b"changed staged executable").unwrap();
+    fs::write(&staged_java, &original).unwrap();
+    fs::set_permissions(&staged_java, fs::Permissions::from_mode(0o500)).unwrap();
+    assert!(staged.verify_unchanged().is_err());
+    staged.retain_for_possible_spawn();
+    assert!(staged.retire_completed().is_err());
+    drop(staged);
+    assert!(root.exists(), "interrupted stage was deleted");
+    let next = StagedRuntimePackage::stage(&package, &parent, expected).unwrap();
+    assert_ne!(next.pin(), &first);
+    let next_root = next.root().to_owned();
+    let moved = parent.join("moved-original");
+    fs::rename(&next_root, &moved).unwrap();
+    fs::create_dir(&next_root).unwrap();
+    fs::write(next_root.join("unrelated"), b"do not delete").unwrap();
+    assert!(next.verify_unchanged().is_err());
+    drop(next);
+    assert_eq!(fs::read(next_root.join("unrelated")).unwrap(), b"do not delete");
+    // Clean up only these test-owned directories. The production path
+    // leaves replaced/possibly-spawned generations for explicit review.
+    for dir in [&root, &moved] {
+        for entry in walkdir::WalkDir::new(dir).follow_links(false) {
+            let entry = entry.unwrap();
+            if entry.file_type().is_dir() {
+                fs::set_permissions(entry.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            }
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+    let mut completed = StagedRuntimePackage::stage(&package, &parent, expected).unwrap();
+    let completed_root = completed.root().to_owned();
+    completed.retain_for_possible_spawn();
+    completed.retire_completed().unwrap();
+    assert!(!completed_root.exists());
+}
+
+#[test]
 fn runtime_intent_fences_handoff_across_process_exit_and_revocation_consumes_consent() {
     let package_root = tempfile::tempdir().unwrap();
     let package = package_root.path().join("package");

@@ -940,9 +940,10 @@ swarmcraft --data-dir "$PROFILE" exclusive-turn runtime probe-java \
 ```
 
 Before any child can spawn, the signed intent changes to the distinct
-`java_probe_may_have_spawned_v2` variant. It embeds the exact machine/boot,
+`java_probe_may_have_spawned_v3` variant. It embeds the exact machine/boot,
 controller birth identity, PID/cgroup/mount namespaces, dedicated cgroup
-identity and admitted CPU/memory/consent revision. The consent lock spans durable
+identity, admitted CPU/memory/consent revision, and exact private staged
+runtime generation identity. V2 retains its original recovery semantics. The consent lock spans durable
 publication, synchronous spawn and process birth-identity capture. Both
 local and account-wide process ownership records precede execution, and
 the kernel limits apply before Java exec. The fixed source-file Java
@@ -951,9 +952,10 @@ environment with bounded log files, and waits for a stdin byte. The
 supervisor verifies the observed CPU and memory policy before releasing
 that gate. It polls current signed consent, process/cgroup membership and
 memory pressure, and imposes a bounded 60-second process deadline. The
-only accepted result is the exact reviewed Java release version, a
-successful exit, empty recorded cgroup, reverified package fingerprint
-and retired local/account ownership records. On success, the CLI consumes
+only accepted result is the exact reviewed Java release version, explicit
+classpath qualification, a successful exit, empty recorded cgroup,
+reverified staged package fingerprint and retired local/account ownership
+records. On success, the CLI consumes
 consent and clears the exact intent under the state lock. Reports are
 point-in-time qualification, never an authorization for a later launch.
 
@@ -988,7 +990,7 @@ before opening the gate and reaped the child. The 13 CLI regressions,
 
 This command does not repeat qualification, spawn a process, kill an
 unknown PID or authorize hosting. It is a denial-only retirement operation
-for the exact V2 probe intent, after the operator independently reviews
+for the exact V2 or V3 probe intent, after the operator independently reviews
 the current local revision, grant, checkpoint and intent ID:
 
 ```sh
@@ -1035,3 +1037,55 @@ leaf all denied. The exact-pin serialization and consent state tests, all
 Clippy passed. The actual Java process fixture also passed with the new
 retained-leaf cleanup ordering. A physical reboot was not performed.
 [Retained evidence](../../research/exclusive-turn/evidence/2026-11-26-probe-recovery.txt).
+
+### Private staged runtime generation and representative class resolution
+
+The probe no longer executes Java from the caller's package path. After
+fresh signed-save/package preflight and normal account capacity admission,
+it creates a new owner-only generation under the exact reference world
+journal directory. This is a copy, not a hardlink/reflink or a reuse of a
+cached installation. Each regular file is read through its inventoried
+identity, bounded and independently hashed while copying; the source
+inventory is rechecked after copying. Internal relative Java legal links
+are reproduced without following them. Copied file bytes are fsynced,
+file modes become read-only with their original executable bits, directory
+modes become 0500, and directories and parent are fsynced. A full fresh
+inspection must reproduce the exact signed compatibility fingerprint.
+The original generation name, device/inode and fingerprint are embedded
+in the distinct signed V3 intent, with the V2 kernel recovery identity.
+Before spawn and the start barrier, the original staged inventory and
+root identity are rechecked. After exit the entire staged package is
+reverified. Ordinary edits to the source package cannot change the staged
+copy. This is cooperative owner-only read-only staging, not a kernel
+immutable mount or a sandbox against a malicious process running as the
+same UID. Native OS shared libraries and the publisher remain outside the
+package proof. Changes, substitutions and unexpected entries fail closed.
+
+The fixed Java program checks that `java.home` is the staged Java tree.
+It builds an explicit URL classloader using only the inventoried extracted
+server, Minecraft libraries, Fabric loader libraries and bridge JAR;
+never the bundler, a generated cache, ambient classpath or external
+manifest Class-Path. It checks bounded legacy JAR indices are self-only,
+then loads representative server, bridge, all seven Fabric dependency
+identities and eleven Minecraft library classes **without initialization**.
+Each representative class must occur once, in its expected dependency
+role, and its actual code source must be that exact staged JAR. This is
+not full dependency linkage, native library execution, Fabric API nested
+mod loading, mixin application or game startup. No world or route opens.
+
+Possible-spawn stages are retained even on error or revoked consent; the
+successful path removes only its exact unchanged stage after quiescence
+and signed intent retirement. Explicit crash recovery leaves any recorded
+stage for operator review rather than deleting or reusing potentially
+modified files. A crash before intent publication or during cleanup can
+also leave a private stage; no orphan-stage garbage collection is claimed.
+The older V1/V2 intent discriminants remain decodable, and older binaries
+cannot decode a V3 record to bypass its fence.
+
+The delegated fixture used the real retained Java 25.0.5.1 package and
+verified 48 explicit JARs and 20 representative classes, with a 500
+millicore CPU limit and 1,536 MiB memory cap. The two intent tests, 14
+CLI integration tests, 213 library tests and strict Clippy passed. The
+staging regression detected source/staged divergence and substituted
+directory identity; the real probe also verified consent withdrawal and
+quiescent cleanup. [Retained evidence](../../research/exclusive-turn/evidence/2026-11-26-staged-runtime.txt).
