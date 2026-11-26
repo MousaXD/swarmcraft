@@ -165,3 +165,60 @@ all-feature Clippy, formatting and workflow/release policy checks. No CI
 was used. The next step is the isolated owner-only atomic reference journal
 with cancel, exact receipt, irreversible release/outbox and restart-safe
 acceptance; live process/route fencing and installed clients remain disabled.
+
+### Local durable reference journal
+
+The explicit `swarmcraft exclusive-turn` commands operate only on
+`exclusive-turn-reference/<scpass hash>/` in an existing private identity
+profile. They never open ordinary world storage or the live daemon.
+`draft`, `approve`, `assemble` and `inspect` provide the separate signed
+creation workflow; initialization requires both exact approvals, an
+independently pinned world/grant, the original verified opaque bytes and
+explicit confirmation. An existing directory without a journal is an
+error, not a request to reset a lost grant. The initial holder and the
+replica maintain independent journals; no shared authority file exists.
+
+The owner-only Linux journal is signed by the existing local identity,
+canonically encoded, bounded to 512 KiB and protected by one stable
+exclusive lock per reference world. Every operation reloads and verifies
+the full signed grant chain, local phase/role/attempt invariants and the
+current and staged checkpoint bytes. Immutable opaque checkpoint files
+are limited to 1 MiB each and 512 retained entries; creation and atomic
+replacement synchronize the file and directory. Missing/corrupt bytes,
+unsafe paths, symlinks, hardlinks, busy locks and malformed journals fail
+closed. Complete disk rollback by the device owner remains outside the
+CFT model; this is not an anti-rollback hardware trust anchor.
+
+The holder may update only its opaque reference checkpoint. Preparing
+persists the exact signed offer and advanced attempt before returning it;
+while prepared, new reference mutation is refused. Cancel is permitted
+only before release and cannot reuse the attempt. The recipient must
+retain the exact opaque bytes and signed receipt before sending it;
+newer attempts replace old staged receipts, while old/conflicting ones
+are denied. A source commit checks the exact prepared offer and receipt,
+then atomically advances its history and sets Released before exposing
+any committed release. The exact still-current release remains in the
+outbox for retry if output is lost. Only the intended recipient with its
+matching durable receipt and verified bytes can accept that release.
+Acceptance cannot restore a changed, prepared or retired turn. Reverse
+transfer preserves the local canceled-attempt floor. No election or
+reset command exists. Status exposes explicit false canonical authority,
+write authority, runtime activation and player admission flags.
+
+The three real subprocess regressions passed in 10.34 seconds and again
+in 15.97 seconds after the strict-Clippy representation fix. The final
+full CLI library regression passed 210 enabled tests (three separately
+scoped cgroup tests ignored), strict all-target/all-feature CLI Clippy,
+formatting and workflow/release checks. They drive
+separate profiles through ordinary draft/approve/assemble/init, checkpoint,
+prepare/cancel/reprepare, staging, irreversible commit, loss of the actual
+commit stdout pipe, exact outbox export, acceptance and reverse transfer.
+They also race cancel against commit, reject stale and malformed records,
+check lock exclusion and journal/byte corruption, refuse symlink/hardlink
+and nonprivate files, and deny reinitialization of missing state. No
+canonical world or runtime is created. This is file-based reference
+transport, NOT proof of online overlap, actual process quiescence, a
+Minecraft save, a licensed player session or actual host partition safety.
+A human-readable draft/record pin inspector, authenticated transport,
+real runtime/route fencing and production creation policy remain to be
+implemented and independently reviewed before activation.

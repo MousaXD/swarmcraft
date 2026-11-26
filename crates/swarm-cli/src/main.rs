@@ -1,4 +1,5 @@
 mod daemon;
+mod exclusive_turn_reference;
 mod invite;
 mod ownerless_authority;
 mod ownerless_creation;
@@ -77,6 +78,11 @@ enum Command {
     Ownerless {
         #[command(subcommand)]
         command: ownerless_creation::OwnerlessCommand,
+    },
+    /// Isolated signed two-device reference journal; never a playable world or runtime permit.
+    ExclusiveTurn {
+        #[command(subcommand)]
+        command: exclusive_turn_reference::ExclusiveTurnCommand,
     },
     /// Manage replicated worlds.
     World {
@@ -510,6 +516,7 @@ fn main() -> Result<()> {
     let command = match cli.command {
         Command::Support { command } => return support_metrics::run(&paths, command),
         Command::Ownerless { command } => return ownerless_creation::run(&paths, command),
+        Command::ExclusiveTurn { command } => return exclusive_turn_reference::run(&paths, command),
         Command::World { command: WorldCommand::Create { ownerless: true, .. } } => {
             bail!("ownerless runtime activation is not supported; use swarmcraft ownerless draft/inspect/approve/assemble/verify. No world created");
         }
@@ -626,6 +633,7 @@ fn main() -> Result<()> {
         }
         Command::Support { .. } => unreachable!("support reports never open canonical storage"),
         Command::Ownerless { .. } => unreachable!("ownerless creation never opens canonical storage"),
+        Command::ExclusiveTurn { .. } => unreachable!("exclusive-turn reference never opens canonical storage"),
         Command::Update { .. } => unreachable!("updates never open canonical storage"),
         Command::Profile { .. } => unreachable!("profile checks are handled before storage opens"),
         Command::Backup { .. } => unreachable!("backup commands are handled before canonical storage opens"),
