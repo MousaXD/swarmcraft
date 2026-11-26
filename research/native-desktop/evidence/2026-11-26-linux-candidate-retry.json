@@ -1,0 +1,89 @@
+{
+  "adapter": {
+    "kind": "WebKitWebDriver",
+    "native_driver_sha256": "18f4fcab95f3c59e53296614e863677b3f9ba67783365ac27bd9ea99cc3378c6",
+    "tauri_driver_sha256": "90a35f2d1f3b0f0afd180c83faa7d9fa6c67cffd94bd82f7050e05250beccb3e"
+  },
+  "architecture": "x86_64",
+  "artifacts": {
+    "broken": {
+      "architecture": "x86_64",
+      "commit": "d6e79b0df0f139e385076d60ee58647e737185e3",
+      "files": {
+        "desktop": "8deb2168034d25cc20445b1553b92e372cfe63ec4e18f902b8b10be789250919",
+        "swarmcraft": "7baadef59000bfc9eb2cf7fe7a3edd0f1d35cea9c0c22b2e7627b790fa929bc0",
+        "swarmcraft-host": "8460ad93e6ff4f37c0095503baa527f7f54acd709a9bbe26db8a3ab3b3d6260d",
+        "swarmcraft-import": "9fd620b0ab2ed228ab1a610502cdbb4d76bf28f4e9b99f97252bf2408e6ea029",
+        "swarmcraft-runtime": "235f09601c23400a86a20a335858dbc984294458d79ba4db839af461470741f3"
+      },
+      "package_sha256": "348bd9ab98e67e118dfec4e6be83f72ede7f427a26c096dfabcb4d715cefc9a4",
+      "platform": "linux",
+      "schema": 1,
+      "tree": "96bce3bc404ca41f4707bdb1bf104ce03cadf599",
+      "variant": "broken"
+    },
+    "candidate": {
+      "architecture": "x86_64",
+      "commit": "d6e79b0df0f139e385076d60ee58647e737185e3",
+      "files": {
+        "desktop": "cae71f25b29572ed046824ce34302aa73b822e733bb68c4d58f3dcee36e241bb",
+        "swarmcraft": "7baadef59000bfc9eb2cf7fe7a3edd0f1d35cea9c0c22b2e7627b790fa929bc0",
+        "swarmcraft-host": "8460ad93e6ff4f37c0095503baa527f7f54acd709a9bbe26db8a3ab3b3d6260d",
+        "swarmcraft-import": "9fd620b0ab2ed228ab1a610502cdbb4d76bf28f4e9b99f97252bf2408e6ea029",
+        "swarmcraft-runtime": "235f09601c23400a86a20a335858dbc984294458d79ba4db839af461470741f3"
+      },
+      "package_sha256": "c860f8f0f49106697f5132a6280a5a0b9c44c415116b411b5f118d4b91b5e611",
+      "platform": "linux",
+      "schema": 1,
+      "tree": "96bce3bc404ca41f4707bdb1bf104ce03cadf599",
+      "variant": "candidate"
+    },
+    "shipping": {
+      "architecture": "x86_64",
+      "commit": "d6e79b0df0f139e385076d60ee58647e737185e3",
+      "files": {
+        "desktop": "c83cf7cada67cafdb5ffe23d646a694cb3e1c10c68c99f08e191abcedea9bd97",
+        "swarmcraft": "7baadef59000bfc9eb2cf7fe7a3edd0f1d35cea9c0c22b2e7627b790fa929bc0",
+        "swarmcraft-host": "8460ad93e6ff4f37c0095503baa527f7f54acd709a9bbe26db8a3ab3b3d6260d",
+        "swarmcraft-import": "9fd620b0ab2ed228ab1a610502cdbb4d76bf28f4e9b99f97252bf2408e6ea029",
+        "swarmcraft-runtime": "235f09601c23400a86a20a335858dbc984294458d79ba4db839af461470741f3"
+      },
+      "package_sha256": "9b8b11819af0c523f93fe9bca594598909fcec0527255436360df00e679f8f43",
+      "platform": "linux",
+      "schema": 1,
+      "tree": "96bce3bc404ca41f4707bdb1bf104ce03cadf599",
+      "variant": "shipping"
+    }
+  },
+  "cgroup_memory_ancestry": "real host cgroup-v2 full hierarchy bound read-only; no limits changed",
+  "complete": false,
+  "elapsed_seconds": 5.854,
+  "failures": {
+    "candidate": {
+      "classification": "RemoteDisconnected",
+      "reason": "non-contract error"
+    }
+  },
+  "platform": "linux",
+  "release_platform_evidence": false,
+  "results": {},
+  "retry_context": {
+    "available_memory_mib_after_run": 1743,
+    "candidate_started_and_reached_ready": true,
+    "cause_of_disconnect_established": false,
+    "disconnected_before_create": true,
+    "host_memory_pressure_observed": true,
+    "product_code_changed": false,
+    "total_swap_mib": 13819,
+    "used_swap_mib_after_run": 11832
+  },
+  "root_ownership": {
+    "root_uid": 0,
+    "work_mode": "0o700",
+    "work_uid": 0
+  },
+  "schema": 1,
+  "scope": "private mapped-user, PID, mount, network namespaces; private tmpfs root, persisted scratch data on local disk; exact same extracted packages; no external network or Java",
+  "source_commit": "d6e79b0df0f139e385076d60ee58647e737185e3",
+  "tree": "96bce3bc404ca41f4707bdb1bf104ce03cadf599"
+}
