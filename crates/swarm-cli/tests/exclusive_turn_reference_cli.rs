@@ -1166,6 +1166,368 @@ fn writer_lost_ack_keeps_exact_durable_checkpoint_and_rejects_stale_cas() {
     f.assert_no_live_storage();
 }
 
+// Synthetic stopped save tree with actual bytes exceeding the old 1 MiB
+// opaque-checkpoint cap. This is a data-integrity fixture, not a playable save.
+fn offline_save(root: &Path) -> PathBuf {
+    let source = root.join("offline-save");
+    fs::create_dir(&source).unwrap();
+    fs::create_dir(source.join("region")).unwrap();
+    fs::create_dir(source.join("playerdata")).unwrap();
+    fs::create_dir(source.join("DIM-1")).unwrap();
+    fs::write(source.join("level.dat"), b"synthetic level.dat fixture").unwrap();
+    fs::write(source.join("session.lock"), b"original session marker").unwrap();
+    let region: Vec<u8> = (0..1_310_721).map(|i| ((i * 17 + i / 1009) % 251) as u8).collect();
+    fs::write(source.join("region/r.0.0.mca"), &region).unwrap();
+    fs::write(source.join("region/r.1.0.mca"), &region).unwrap();
+    fs::write(source.join("playerdata/empty.dat"), []).unwrap();
+    source
+}
+
+fn save_cmd(profile: &Path, action: &str) -> Command {
+    cmd(profile, &["save", action])
+}
+
+fn capture_save(profile: &Path, source: &Path, destination: &Path) -> Command {
+    let mut command = save_cmd(profile, "capture");
+    command.args([
+        "--source",
+        path(source),
+        "--destination",
+        path(destination),
+        "--compatibility",
+        &Hash32([3; 32]).to_string(),
+        "--confirm",
+    ]);
+    command
+}
+
+fn pinned_save(profile: &Path, action: &str, bundle: &Path, report: &Value) -> Command {
+    let mut command = save_cmd(profile, action);
+    command.args([
+        "--bundle",
+        path(bundle),
+        "--expected-manifest",
+        report["manifest_hash"].as_str().unwrap(),
+        "--expected-state-root",
+        report["state_root"].as_str().unwrap(),
+        "--expected-compatibility",
+        report["compatibility"].as_str().unwrap(),
+    ]);
+    command
+}
+
+fn assert_save_flags(report: &Value, classification: &str) {
+    assert_eq!(report["classification"], classification);
+    for flag in [
+        "canonical_authority",
+        "write_authority",
+        "runtime_activation",
+        "player_admission",
+        "handoff_receipt_issued",
+        "minecraft_gameplay_verified",
+    ] {
+        assert_eq!(report[flag], false, "{flag}");
+    }
+}
+
+fn assert_same_save(source: &Path, restored: &Path) {
+    for name in ["level.dat", "region/r.0.0.mca", "region/r.1.0.mca", "playerdata/empty.dat"] {
+        assert_eq!(fs::read(source.join(name)).unwrap(), fs::read(restored.join(name)).unwrap());
+    }
+    assert!(restored.join("DIM-1").is_dir());
+    assert_eq!(fs::read(restored.join("session.lock")).unwrap(), b"");
+    assert_eq!(fs::read(source.join("session.lock")).unwrap(), b"original session marker");
+}
+
+#[test]
+fn offline_save_exact_capture_restore_and_corruption_refusals() {
+    use std::os::fd::AsRawFd;
+    let temp = tempfile::tempdir().unwrap();
+    let profile = temp.path().join("never-created-profile");
+    let source = offline_save(temp.path());
+    let bundle = temp.path().join("bundle");
+    let lock_file = std::fs::OpenOptions::new().read(true).write(true).open(source.join("session.lock")).unwrap();
+    let mut lock: libc::flock = unsafe { std::mem::zeroed() };
+    lock.l_type = libc::F_WRLCK as _;
+    lock.l_whence = libc::SEEK_SET as _;
+    // Real process-associated record lock held by the test process;
+    // the capture CLI is a different process.
+    assert_eq!(unsafe { libc::fcntl(lock_file.as_raw_fd(), libc::F_SETLK, &lock) }, 0);
+    rejected(capture_save(&profile, &source, &bundle).output().unwrap(), "save is open");
+    assert!(!bundle.exists());
+    drop(lock_file);
+
+    // A source alias is denied, not dereferenced into the archive.
+    let alias = source.join("region/alias.mca");
+    symlink(source.join("region/r.0.0.mca"), &alias).unwrap();
+    rejected(capture_save(&profile, &source, &bundle).output().unwrap(), "unsafe save entry");
+    fs::remove_file(&alias).unwrap();
+    fs::hard_link(source.join("region/r.0.0.mca"), &alias).unwrap();
+    rejected(capture_save(&profile, &source, &bundle).output().unwrap(), "unsafe save entry");
+    fs::remove_file(&alias).unwrap();
+    fs::write(source.join("region/R.0.0.mca"), b"case collision").unwrap();
+    rejected(capture_save(&profile, &source, &bundle).output().unwrap(), "duplicate or noncanonical");
+    fs::remove_file(source.join("region/R.0.0.mca")).unwrap();
+    fs::write(source.join("CON.dat"), b"reserved").unwrap();
+    rejected(capture_save(&profile, &source, &bundle).output().unwrap(), "reserved portable");
+    fs::remove_file(source.join("CON.dat")).unwrap();
+    let nested = source.join("inside");
+    rejected(capture_save(&profile, &source, &nested).output().unwrap(), "inside source");
+    assert!(!nested.exists());
+
+    let captured = json(capture_save(&profile, &source, &bundle).output().unwrap());
+    assert_save_flags(&captured, "exclusive_turn_save_data_captured");
+    assert_eq!(captured["entries"], 7);
+    assert_eq!(captured["unique_blobs"], 3);
+    assert_eq!(captured["total_bytes"], 2 * 1_310_721 + b"synthetic level.dat fixture".len() as u64);
+    let manifest = fs::read(bundle.join("manifest.postcard")).unwrap();
+    assert_eq!(
+        captured["manifest_hash"],
+        Hash32::from_domain_bytes(b"swarmcraft/exclusive-turn/save-manifest/v1\0", &manifest).to_string()
+    );
+    assert_eq!(captured["reference_commitment"], exclusive_turn_reference_commitment(&manifest).unwrap().to_string());
+    let verified = json(pinned_save(&profile, "verify", &bundle, &captured).output().unwrap());
+    assert_save_flags(&verified, "exclusive_turn_save_data_verified");
+    let second = temp.path().join("bundle-again");
+    let again = json(capture_save(&profile, &source, &second).output().unwrap());
+    assert_eq!(again["manifest_hash"], captured["manifest_hash"]);
+    assert_eq!(fs::read(second.join("manifest.postcard")).unwrap(), manifest);
+    rejected(capture_save(&profile, &source, &bundle).output().unwrap(), "already exists");
+
+    let mut wrong = captured.clone();
+    wrong["state_root"] = serde_json::json!(Hash32([7; 32]).to_string());
+    rejected(pinned_save(&profile, "verify", &bundle, &wrong).output().unwrap(), "independent pin");
+    let restored = temp.path().join("restored");
+    let result = json(
+        pinned_save(&profile, "restore", &bundle, &captured)
+            .args(["--destination", path(&restored), "--confirm"])
+            .output()
+            .unwrap(),
+    );
+    assert_save_flags(&result, "exclusive_turn_save_data_restored");
+    assert_same_save(&source, &restored);
+    rejected(
+        pinned_save(&profile, "restore", &bundle, &captured)
+            .args(["--destination", path(&restored), "--confirm"])
+            .output()
+            .unwrap(),
+        "already exists",
+    );
+    assert_same_save(&source, &restored);
+
+    let large_blob = bundle.join("blobs").join(
+        Hash32::from_domain_bytes(
+            b"swarmcraft/exclusive-turn/save-blob/v1\0",
+            &fs::read(source.join("region/r.0.0.mca")).unwrap(),
+        )
+        .to_string(),
+    );
+    let original = fs::read(&large_blob).unwrap();
+    let mut changed = original.clone();
+    changed[123_456] ^= 1;
+    fs::write(&large_blob, &changed).unwrap();
+    let failed = temp.path().join("corrupt-restore");
+    rejected(
+        pinned_save(&profile, "restore", &bundle, &captured)
+            .args(["--destination", path(&failed), "--confirm"])
+            .output()
+            .unwrap(),
+        "digest or length differs",
+    );
+    assert!(!failed.exists());
+    fs::write(&large_blob, &original).unwrap();
+    let extra = bundle.join("blobs").join(Hash32([99; 32]).to_string());
+    fs::write(&extra, b"unexpected").unwrap();
+    fs::set_permissions(&extra, fs::Permissions::from_mode(0o600)).unwrap();
+    rejected(pinned_save(&profile, "verify", &bundle, &captured).output().unwrap(), "unexpected save blob");
+    fs::remove_file(&extra).unwrap();
+    let mut malformed = manifest.clone();
+    malformed.push(0);
+    fs::write(bundle.join("manifest.postcard"), malformed).unwrap();
+    rejected(pinned_save(&profile, "verify", &bundle, &captured).output().unwrap(), "noncanonical");
+    fs::write(bundle.join("manifest.postcard"), &manifest).unwrap();
+    success(pinned_save(&profile, "verify", &bundle, &captured).output().unwrap());
+    assert!(!profile.exists());
+    assert!(!fs::read_dir(temp.path()).unwrap().any(|item| item
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .starts_with(".exclusive-save-")));
+}
+
+impl Fixture {
+    fn save_transfer(&self, device: usize, action: &str, base: &str, offer: &str) -> Command {
+        let mut command = save_cmd(&self.profiles[device], action);
+        command.args([
+            "--expected-world",
+            &self.world,
+            "--expected-grant",
+            base,
+            "--expected-offer",
+            offer,
+            "--confirm",
+        ]);
+        command
+    }
+
+    fn save_serve(&self, base: &str, offer: &str, bundle: &Path) -> (Server, SocketAddr) {
+        let child = self
+            .save_transfer(0, "serve", base, offer)
+            .args(["--bundle", path(bundle), "--bind", "127.0.0.1:0"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut server = Server(Some(child));
+        let mut line = String::new();
+        BufReader::new(server.0.as_mut().unwrap().stdout.as_mut().unwrap()).read_line(&mut line).unwrap();
+        assert!(!line.is_empty(), "save listener not ready: {:?}", server.0.as_mut().unwrap().try_wait());
+        let ready: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(ready["classification"], "exclusive_turn_save_listener");
+        assert_eq!(ready["world_id"], self.world);
+        assert_eq!(ready["base"], base);
+        assert_eq!(ready["offer"], offer);
+        assert_eq!(ready["handoff_receipt_issued"], false);
+        (server, ready["address"].as_str().unwrap().parse().unwrap())
+    }
+
+    fn save_fetch(&self, base: &str, offer: &str, file: &Path, destination: &Path, address: SocketAddr) -> Output {
+        self.save_transfer(1, "fetch", base, offer)
+            .args([
+                "--offer",
+                path(file),
+                "--destination",
+                path(destination),
+                "--peer",
+                &format!("{}@{address}", self.identities[0].peer_id()),
+            ])
+            .output()
+            .unwrap()
+    }
+}
+
+// Encrypted manifest arrives, then an authenticated blob frame is corrupted.
+// Proxy does not possess either key or know any plaintext.
+fn corrupt_save_blob(target: SocketAddr) -> (SocketAddr, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let handle = thread::spawn(move || {
+        listener.set_nonblocking(true).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut client = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline);
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("{error}"),
+            }
+        };
+        let mut source = TcpStream::connect_timeout(&target, Duration::from_secs(5)).unwrap();
+        for stream in [&client, &source] {
+            stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            stream.set_write_timeout(Some(Duration::from_secs(10))).unwrap();
+        }
+        forward(&mut client, &mut source);
+        forward(&mut source, &mut client);
+        forward(&mut source, &mut client);
+        forward(&mut client, &mut source);
+        forward(&mut source, &mut client); // manifest length
+        forward(&mut source, &mut client); // small canonical manifest
+        let mut blob = frame(&mut source);
+        *blob.last_mut().unwrap() ^= 1;
+        client.write_all(&blob).unwrap();
+        let _ = client.shutdown(Shutdown::Both);
+        let _ = source.shutdown(Shutdown::Both);
+    });
+    (address, handle)
+}
+
+#[test]
+fn authenticated_save_blob_transfer_is_exact_and_never_releases_a_turn() {
+    let f = Fixture::new();
+    let source = offline_save(f.temp.path());
+    let bundle = f.temp.path().join("save-bundle");
+    let captured = json(capture_save(&f.profiles[0], &source, &bundle).output().unwrap());
+    let initial = exclusive_turn_reference_commitment(&fs::read(&f.initial).unwrap()).unwrap().to_string();
+    let manifest = bundle.join("manifest.postcard");
+    let commitment = captured["reference_commitment"].as_str().unwrap();
+    report(
+        &json(f.mutate(
+            0,
+            "checkpoint",
+            &f.initial_grant,
+            &[
+                "--expected-checkpoint",
+                &initial,
+                "--checkpoint",
+                path(&manifest),
+                "--manifest-hash",
+                captured["manifest_hash"].as_str().unwrap(),
+                "--state-root",
+                captured["state_root"].as_str().unwrap(),
+            ],
+        )),
+        "held",
+        1,
+    );
+    let (offer, offer_bytes) = f.prepare(0, &f.initial_grant, commitment);
+    let offer_hash = offer.offer_hash().unwrap().to_string();
+    let file = f.put("save-offer.json", &offer_bytes);
+    let before = [f.snapshot(0), f.snapshot(1)];
+    let destination = f.temp.path().join("received");
+    rejected(
+        f.save_fetch(
+            &f.initial_grant,
+            &Hash32([88; 32]).to_string(),
+            &file,
+            &destination,
+            "127.0.0.1:1".parse().unwrap(),
+        ),
+        "offer differs",
+    );
+    assert!(!destination.exists());
+    let (server, target) = f.save_serve(&f.initial_grant, &offer_hash, &bundle);
+    rejected(f.mutate(0, "cancel", &f.initial_grant, &["--expected-offer", &offer_hash]), "journal busy");
+    let (proxy_address, proxy) = corrupt_save_blob(target);
+    let failure = f.save_fetch(&f.initial_grant, &offer_hash, &file, &destination, proxy_address);
+    assert!(!failure.status.success());
+    assert!(failure.stdout.is_empty());
+    proxy.join().unwrap();
+    assert!(!server.finish().status.success());
+    assert!(!destination.exists());
+    assert_eq!([f.snapshot(0), f.snapshot(1)], before);
+    assert!(!fs::read_dir(f.temp.path()).unwrap().any(|item| item
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .starts_with(".exclusive-save-")));
+    let (server, target) = f.save_serve(&f.initial_grant, &offer_hash, &bundle);
+    let received = json(f.save_fetch(&f.initial_grant, &offer_hash, &file, &destination, target));
+    success(server.finish());
+    assert_save_flags(&received, "exclusive_turn_save_data_received");
+    for field in ["manifest_hash", "state_root", "reference_commitment", "compatibility", "total_bytes", "unique_blobs"]
+    {
+        assert_eq!(received[field], captured[field]);
+    }
+    assert_eq!(fs::read(destination.join("manifest.postcard")).unwrap(), fs::read(manifest).unwrap());
+    assert_eq!([f.snapshot(0), f.snapshot(1)], before);
+    report(&f.status(0), "prepared", 1);
+    report(&f.status(1), "replica", 1);
+    assert_eq!(f.status(1)["staged_offer"], Value::Null);
+    let restored = f.temp.path().join("network-restored");
+    let result = json(
+        pinned_save(&f.profiles[1], "restore", &destination, &captured)
+            .args(["--destination", path(&restored), "--confirm"])
+            .output()
+            .unwrap(),
+    );
+    assert_save_flags(&result, "exclusive_turn_save_data_restored");
+    assert_same_save(&source, &restored);
+    f.assert_no_live_storage();
+}
+
 #[test]
 fn encrypted_handoff_partition_boundaries_and_exact_outbox_retry() {
     let f = Fixture::new();

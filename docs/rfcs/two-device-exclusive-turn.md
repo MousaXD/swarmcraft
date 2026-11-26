@@ -399,3 +399,114 @@ adapter must retain the machine-wide hosting reservation, verified
 supervised process ownership, real checkpoint barrier and Fabric
 attestation; opaque digests or a reference writer lock cannot substitute
 for those requirements. No normal hosting admission was relaxed.
+
+### Offline save-data manifest and authenticated blob transfer
+
+The separate Linux `exclusive-turn save` adapter provides bounded
+file-level integrity, capture and restore for an explicitly chosen
+stopped Minecraft-shaped save directory. It is intentionally not a
+Minecraft semantic/NBT parser, supervised runtime checkpoint barrier,
+canonical snapshot importer or permission to start a JVM. Neither the
+ordinary reference journal nor its handoff receipt implies the presence
+of these blobs. A future live adapter must require verified complete
+save data and quiescence before issuing its own release/activation.
+
+Capture requires a nonempty regular `level.dat` and an existing safe
+root `session.lock`. It acquires an exclusive nonblocking POSIX record
+lock (compatible with Java FileChannel locks) for the entire capture and
+publication, verifies the lock inode, refuses links and unsafe paths,
+and compares the source file and directory identities, size, modification
+and change times before/after reading and immediately before publication.
+It assumes a cooperative local account and filesystem; the session
+lock cannot rule out unrelated applications ignoring it, malicious
+same-account mutation or complete journal rollback. It never writes
+to the source. Root `session.lock` is transient and excluded from the
+canonical state; a new empty lock file is created on offline restore.
+
+The canonical bounded postcard manifest records a compatibility digest
+and sorted ASCII portable relative paths, directories (including empty
+directories), raw file lengths and domain-separated BLAKE3 content
+digests. It rejects path aliases (including directory case collisions),
+traversal, reserved names, links, special files, cross-device entries,
+missing parents, duplicates, inconsistent blob lengths, unbounded
+lengths and noncanonical serialization. The manifest hash commits to
+all encoded fields; the independently derived state root commits to the
+directory/file list. The existing reference commitment covers exactly
+the manifest bytes, not the full save. Raw content-addressed blobs are
+deduplicated and verified against their manifest descriptors. The limits
+are 4,096 entries, 512 MiB per file, 2 GiB total logical bytes and a
+1 MiB manifest. Capture/receive/restore use bounded 32 KiB file buffers,
+a conservative 1 GiB free-space margin (a check, not an OS reservation),
+owner-only temporary sibling directories, file/directory synchronization
+and Linux atomic no-replace directory rename. An existing target is
+never overwritten. A normal error removes private temporary state; a
+hard-killed process may leave an unpublished scratch directory. After
+a successful rename but lost output or acknowledgment, reverify the
+existing complete destination rather than retrying over it.
+
+```sh
+swarmcraft exclusive-turn save capture \
+  --source "$STOPPED_SAVE" --destination "$BUNDLE" \
+  --compatibility "$COMPATIBILITY" --confirm
+
+swarmcraft exclusive-turn save verify --bundle "$BUNDLE" \
+  --expected-manifest "$MANIFEST" --expected-state-root "$ROOT" \
+  --expected-compatibility "$COMPATIBILITY"
+
+swarmcraft exclusive-turn save restore --bundle "$BUNDLE" \
+  --expected-manifest "$MANIFEST" --expected-state-root "$ROOT" \
+  --expected-compatibility "$COMPATIBILITY" \
+  --destination "$NEW_OFFLINE_SAVE" --confirm
+```
+
+Use a new destination inside an existing private parent. To test the
+separate network data workflow, update the holder's **reference**
+checkpoint to `$BUNDLE/manifest.postcard` with the captured manifest
+and state-root digests, then prepare an exact reference offer. Both
+devices independently review the world, prior grant, offer and
+compatibility. The source must hold the prepared journal lock for the
+entire one-shot data transfer. The intended replica or released
+recipient verifies the signed offer against its exact current base
+and holds its own journal lock throughout. The Noise channel has
+separate data-transfer and authentication domains, binds both fixed
+identities, world/base/offer and uses a 15-second accept window and
+120-second monotonic session I/O deadline. The manifest is received
+and independently matched against all three signed checkpoint digests
+and compatibility before blob reception. Blobs are streamed in
+deterministic hash order, verified on receipt, fully reverified from
+disk and published before an encrypted manifest-hash completion
+marker is returned. No signed handoff receipt or grant is emitted;
+neither local journal changes.
+
+```sh
+swarmcraft --data-dir "$SOURCE_PROFILE" exclusive-turn save serve \
+  --expected-world "$WORLD" --expected-grant "$BASE" \
+  --expected-offer "$OFFER_HASH" --bundle "$BUNDLE" \
+  --bind 127.0.0.1:0 --confirm
+
+swarmcraft --data-dir "$RECIPIENT_PROFILE" exclusive-turn save fetch \
+  --expected-world "$WORLD" --expected-grant "$BASE" \
+  --expected-offer "$OFFER_HASH" --offer "$REVIEWED_OFFER" \
+  --destination "$RECIPIENT_BUNDLE" \
+  --peer "$SOURCE_PEER@$LISTENER_ADDRESS" --confirm
+```
+
+This is a full transfer, not resumable blob synchronization; a failed
+unpublished transfer can be retried with the exact original pins.
+Both capture and restore output explicitly false canonical authority,
+write authority, runtime activation, player admission, handoff receipt
+and Minecraft gameplay flags. The 1 MiB opaque reference limit is
+unchanged. Actual runtime compatibility, Minecraft save semantics,
+Fabric checkpoint/stream fencing and production resource consent
+still require their respective independent gates.
+
+The two new real CLI subprocess regressions passed along with all six
+existing exclusive-turn tests (8/8 in 32.22 seconds), strict all-target/
+all-feature CLI Clippy, formatting, workflow and release checks. The
+synthetic fixture has 2,621,469 logical bytes, including duplicate
+1,310,721-byte region-shaped files, one empty file and one empty
+directory. The tests exercise an actual competing POSIX session lock,
+portable aliases, symlinks/hardlinks, exact restoration, corrupt and
+extra blobs, noncanonical manifests, destination no-clobber, encrypted
+blob corruption and retry, and byte-identical source and recipient
+journals before/after transfer. [Retained output and source/artifact pins](../../research/exclusive-turn/evidence/2026-11-26-offline-save-transfer.txt).

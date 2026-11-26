@@ -1,0 +1,32 @@
+Local Linux exclusive-turn offline save integrity and authenticated transfer, 26 November 2026
+Baseline 2f8fe816c8a0d68b51de23ac0ce917044c7a7757
+Synthetic stopped save tree, 2,621,469 logical bytes, 3 unique blobs, 7 entries. Not Minecraft semantic or gameplay qualification.
+Strict CLI Clippy, formatting, workflow and release checks passed. No CI.
+Source and executable SHA-256 pins:
+dcfdfa21f23c9dd4a629f0cdac76cfeda6290ee509322e5f2004e2d97b112699  crates/swarm-cli/src/exclusive_turn_reference.rs
+f4813712db1d21f79d090fcd8b9bf7b3dd0b4be4256070c15063271e9c99a2e7  crates/swarm-cli/src/exclusive_turn_save.rs
+c0ef26f4a6b372383ac59b10059278097e3177925cd526a01a9a14d5f66e8bb1  crates/swarm-cli/tests/exclusive_turn_reference_cli.rs
+670191552b5aa34cb0e0fded4bafda972bbbab666563017f69fbcd5ba7af9995  target/debug/swarmcraft
+bf2e08a9206e8d89e29d0678ff79810e23fb95be5fd7cebe76ccd9d7bcb0f58f  target/debug/deps/exclusive_turn_reference_cli-6e8a19a91e9591be
+
+exclusive-turn integration full log SHA-256: 105c73664a0f11c64d564a41a975675abd7c4de0bbf188609d36771ccd01155d
+   Compiling swarm-cli v0.5.1 (/home/mousa/projects/my-creations/swarmcraft/swarmcraft/.worktrees/sabathon-p0-integration-20261123/crates/swarm-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 23s
+     Running tests/exclusive_turn_reference_cli.rs (target/debug/deps/exclusive_turn_reference_cli-6e8a19a91e9591be)
+
+running 8 tests
+test authenticated_save_blob_transfer_is_exact_and_never_releases_a_turn ... ok
+test concurrent_cancel_and_commit_cannot_both_succeed ... ok
+test encrypted_handoff_partition_boundaries_and_exact_outbox_retry ... ok
+test offline_save_exact_capture_restore_and_corruption_refusals ... ok
+test private_lock_corruption_and_missing_staged_bytes_refuse_without_reinitializing ... ok
+test real_process_round_trip_cancellation_stale_receipts_and_lost_commit_output ... ok
+test real_writer_lock_route_and_crash_fence_survive_network_handoff ... ok
+test writer_lost_ack_keeps_exact_durable_checkpoint_and_rejects_stale_cas ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 32.22s
+
+
+strict CLI Clippy full log SHA-256: 1a4201279c36b4d07b03919e6199cfd0819a18fc83a51a5008e22515b56c8a59
+   Compiling swarm-cli v0.5.1 (/home/mousa/projects/my-creations/swarmcraft/swarmcraft/.worktrees/sabathon-p0-integration-20261123/crates/swarm-cli)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 27.30s

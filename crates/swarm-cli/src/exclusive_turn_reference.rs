@@ -17,6 +17,8 @@ use swarm_protocol::*;
 
 #[path = "exclusive_turn_network.rs"]
 mod network;
+#[path = "exclusive_turn_save.rs"]
+mod save;
 #[path = "exclusive_turn_writer.rs"]
 mod writer;
 
@@ -74,6 +76,11 @@ impl ReferenceCheckpoint {
 
 #[derive(Debug, Subcommand)]
 pub enum ExclusiveTurnCommand {
+    /// Verify and transfer offline save bytes; never grants Minecraft authority.
+    Save {
+        #[command(subcommand)]
+        command: save::SaveCommand,
+    },
     /// Bounded in-process opaque-state writer; never a Minecraft runtime.
     Writer {
         #[command(subcommand)]
@@ -711,6 +718,7 @@ fn accept_reference(
 pub fn run(paths: &DataPaths, command: ExclusiveTurnCommand) -> Result<()> {
     use ExclusiveTurnCommand::*;
     match command {
+        Save { command } => save::run(paths, command),
         Writer { command } => writer::run(paths, command),
         Network { command } => network::run(paths, command),
         Draft { device_keys, initial_holder, compatibility, state } => {
