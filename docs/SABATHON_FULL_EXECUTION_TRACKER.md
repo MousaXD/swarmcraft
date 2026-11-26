@@ -18,6 +18,7 @@ Implementation completion: count only items whose full implementation criteria a
 - State: **IN PROGRESS**
 - Source: apps/desktop/
 - Evidence: Live integration status; scoped automated evidence, exact-SHA CI pending.
+- Fresh private-world follow-up: Actual CLI create plus two fresh invites using live LAN connectivity, committed joint membership and verified checkpoint, followed by real Minecraft status. No preseeded records or implicit consent. Installed UI still open. [Fresh private wake report](../research/minecraft-gateway/FRESH_PRIVATE_WAKE_REPORT.md).
 - Remaining / next action: Run complete installed invite-to-play journey
 - External dependency: Not yet established; assess during execution.
 - Commit: 2d45f97 baseline; see live status for individual commits
@@ -28,7 +29,8 @@ Implementation completion: count only items whose full implementation criteria a
 - State: **LOCALLY VERIFIED**
 - Source: crates/swarm-cli/src/live_authority.rs
 - Evidence: Live integration status; scoped automated evidence, exact-SHA CI pending.
-- Remaining / next action: Confirm exact-SHA CI; audit unknown-successor discovery
+- Fresh private-world follow-up: Bounded exact-input in-memory successful historical signature memoization; all 210 enabled CLI library tests, mutation/poison/eviction tests and real fresh-invite founderless wake gate passed. Current durable reads, complete snapshot hashing, fresh votes, Fabric attestations and deadlines unchanged. [Fresh private wake report](../research/minecraft-gateway/FRESH_PRIVATE_WAKE_REPORT.md).
+- Remaining / next action: Review exact historical signature cache and unknown-successor discovery in the independent source audit; physical network acceptance remains open. Hosted CI prohibited for this execution.
 - External dependency: Not yet established; assess during execution.
 - Commit: 2d45f97 baseline; see live status for individual commits
 
@@ -38,6 +40,7 @@ Implementation completion: count only items whose full implementation criteria a
 - State: **IN PROGRESS**
 - Source: crates/swarm-network/
 - Evidence: Live integration status; scoped automated evidence, exact-SHA CI pending. Local real-server gateway gate passed across initial, planned-transfer and crash-recovery epochs 1/2/3, all with the actual compiled Java client policy, unchanged player port and saved file marker. Final sleeping route refused; see [retained evidence](../research/minecraft-gateway/evidence/2026-11-26-live-reconnect.txt). Old active player login/stream and installed GUI acceptance remain separate.
+- Fresh private-world follow-up: Fresh-world real gateway at epochs 1 and 2 and stable loopback after all peers restart, plus safe sleep and refusal passed; actual game login remains open. [Fresh private wake report](../research/minecraft-gateway/FRESH_PRIVATE_WAKE_REPORT.md).
 - Remaining / next action: Run installed reconnect with saved marker and retired-host refusal
 - External dependency: Not yet established; assess during execution.
 - Commit: 2d45f97 baseline; see live status for individual commits
@@ -58,6 +61,7 @@ Implementation completion: count only items whose full implementation criteria a
 - State: **IN PROGRESS**
 - Source: crates/swarm-cli/src/host_readiness.rs
 - Evidence: Live integration status; scoped automated evidence, exact-SHA CI pending. Real-server final save and signed sleep replicated to the surviving voter; green shutdown remained false while the crashed voter was absent. Installed GUI readiness acceptance remains open.
+- Fresh private-world follow-up: Fresh real-server safe sleep reached green only after both replicas acknowledged exact signed boundary; absent founder on final sleep correctly kept green false. [Fresh private wake report](../research/minecraft-gateway/FRESH_PRIVATE_WAKE_REPORT.md).
 - Remaining / next action: Exercise installed negative and positive readiness states
 - External dependency: Not yet established; assess during execution.
 - Commit: 2d45f97 baseline; see live status for individual commits
@@ -65,11 +69,12 @@ Implementation completion: count only items whose full implementation criteria a
 ### #6 — Sabathon P0 · Partial
 - Work: Make sleep/wake reachable through ordinary UI and verify the supported quorum path with real Minecraft
 - Acceptance: All peers stop safely. Original host stays off. A supported surviving majority wakes the exact saved world with one active authority
-- State: **IN PROGRESS**
+- State: **LOCALLY VERIFIED**
 - Source: crates/swarm-cli/src/migration.rs
 - Evidence: Live integration status; scoped automated evidence, exact-SHA CI pending.
-- Remaining / next action: Exercise real Minecraft sleep/wake after original host leaves
-- External dependency: Not yet established; assess during execution.
+- Fresh private-world follow-up: Complete real Minecraft 26.1.2 CLI create/invite/sleep/wake gate passed in 173.35s. All peers stopped, single candidate denied ten seconds, survivor majority (one headless voter) woke the exact saved world while founder stayed off, new epoch and fence verified, original stable gateway accepted real Minecraft status; final sleep and missing-founder acknowledgement refusal passed. [Fresh private wake report](../research/minecraft-gateway/FRESH_PRIVATE_WAKE_REPORT.md).
+- Remaining / next action: Verify installed Desktop wake and safe-stop interaction, actual authenticated client and independent-host field qualification. Full local real-server CLI gate passed.
+- External dependency: Actual installed clients and independent physical devices for field acceptance.
 - Commit: 2d45f97 baseline; see live status for individual commits
 
 ### #7 — P1 · Missing
@@ -79,6 +84,7 @@ Implementation completion: count only items whose full implementation criteria a
 - Source: [Client reconnect guide](CLIENT_RECONNECT.md); `minecraft/fabric/src/clientReconnect/`, `src/clientReconnectTest/`, and explicit Gradle client tasks.
 - Evidence: Client-only Fabric JAR builds against Minecraft 26.1.2/Java 25/Fabric, separate from unchanged server bridge. Optional per-disconnect action or explicit default-off automatic mode with visible grace period; exact prior joined socket, fixed native status query, strict current proof and exact loopback entry, bounded single-flight probes, cancellation and one fresh vanilla login. All 89 local policy/process assertions passed, including malformed and stale proof, exact socket, default-off, no default-port DNS SRV redirect, actual cancellation, timeout/output caps and real no-daemon CLI denial. Both JAR builds passed; artifact inspection proves client-only metadata, no embedded test/server code and byte-exact unchanged server JAR. Workflow policy/release checks passed.
 - Native gateway follow-up: [Client reconnect guide](CLIENT_RECONNECT.md). Test-only Java probe uses exact client JAR, native live status and a fresh Minecraft status socket; four actual daemon denial scenarios passed, with no attempted unauthorized socket before/after restart. Initial real-server run installed both runtimes but failed first route after a 5892ms server-thread stall invalidated the controller. Bridge now limits readiness to one queued task, sends correlated refusal at 500ms, suppresses late success and retains occupied slot until drained, with independent lease watchdog and unchanged Rust deadlines. 113 slot assertions, 89 client assertions, all 8 IPC tests and artifact isolation passed. Corrected real-server run passed initial epoch 1 and planned handoff epoch 2 including actual Java status probes, stable port and saved marker. Surviving majority certified epoch 3 after deliberate successor crash, the actual Java probe received real Minecraft status at the unchanged port, the saved marker survived, and exact final sleep/checkpoint replicated to the surviving voter. Java denied a new route after stop; green shutdown remained false because the crashed voter was absent. Full local test passed in 217.11 seconds; [retained result](../research/minecraft-gateway/evidence/2026-11-26-live-reconnect.txt).
+- Fresh private-world follow-up: Fresh invitation history and founderless wake gate exercised exact client decoder and real Minecraft status at both epochs; sleeping routes refused twice. [Fresh private wake report](../research/minecraft-gateway/FRESH_PRIVATE_WAKE_REPORT.md).
 - Remaining / next action: Actual authenticated Minecraft client GUI, exact successor handoff/crash and saved marker with stable loopback; test opt-out, cancellation, login failure, quorum loss and representative native OSes. Packaging/release of the optional artifact requires its own review.
 - External dependency: Real supported client/accounts and independent-host gameplay verification. Local compile and subprocess tests are not an installed-client result.
 - Commit: Optional Fabric client reconnect checkpoint; see git history.
@@ -99,6 +105,7 @@ Implementation completion: count only items whose full implementation criteria a
 - State: **LOCALLY VERIFIED**
 - Source: crates/swarm-cli/src/{main,hosting_budget,daemon,live_authority}.rs; docs/HEADLESS_REPLICA.md; deploy/systemd/swarmcraft-replica.service
 - Evidence: 138 CLI library tests, 4 public CLI hosting tests, and real three-daemon recovery/wake with a replica-only voter passed. The local process test checks exact signed recovery votes, restart, no runtime, and no permit. Dedicated profile and deployment example implemented.
+- Fresh private-world follow-up: Fresh real-server run uses a headless replica-only voter through signed admission, exact sleep acknowledgements, all-peer stop/restart and founderless wake. No JVM, permit or hosting consent on that voter. [Fresh private wake report](../research/minecraft-gateway/FRESH_PRIVATE_WAKE_REPORT.md).
 - Remaining / next action: Field-run a low-memory VPS/Pi/NAS with independent transport, verify snapshot/ack across restart, measure storage/RSS, and validate real Minecraft offline handoff. Systemd example not installed on a live device.
 - External dependency: Dedicated third device/network and real gameplay for field acceptance.
 - Commit: See 25 November headless replica checkpoint.
@@ -772,4 +779,4 @@ Initial full-item implementation/acceptance totals: not yet established by item-
 - Private replication uses the current signed membership with a matching descriptor and rechecks the exact authenticated recipient before normal payload, manifest acknowledgement and every blob chunk. A half-installed signed roster denies data instead of trusting an obsolete descriptor. Removed local recipients also refuse normal snapshot bytes. Ordinary unauthorized world requests receive a generic refusal.
 - Evidence: strict CLI/storage Clippy, 51 daemon/CLI binary tests, 67 storage tests (1 optional soak ignored), and actual authenticated invite/leave/replication test passed (19.73s). A reusable grant admitted a third peer; revocation left committed membership intact; joint leave committed; a real network probe authenticated as the removed member received status/history refusal and no newer manifest/blob payload while the remaining member verified a new checkpoint. The old device retained its old verified save. Prior commit 8653c2d required CI completed successfully (run 45585530110). Broader local CLI validation underway; UI and field acceptance remain.
 
-Latest actionable continuation after #68 combined local reference qualification, exact certified-cut client boundary, encrypted checkpoint certification, non-destructive certified staging restoration, managed contribution lifecycle and consent-preserving managed restore with continuous invitation checks, #66 encrypted collection, synchronization, collector-loss recovery, certified-head discovery and bounded repeated reconciliation, and #63 exact receipt/replay optimization: five strict local low-load runs pass in the latest matrix; heavy/WAN and increased sustainable worker capacity remain unqualified. Restart-safe exact managed certification/reconciliation is locally implemented; continue original private-world acceptance, and stable-host controlled network comparisons and sustained soak. No local reference qualification substitutes for these gates. Ownerless gameplay stays disabled until canonical authority, admission and field gates are met. The #63 complete service, independent quorum, physical, compatibility and actual Minecraft gameplay gates remain open.
+Latest actionable continuation after #68 combined local reference qualification, exact certified-cut client boundary, encrypted checkpoint certification, non-destructive certified staging restoration, managed contribution lifecycle and consent-preserving managed restore with continuous invitation checks, #66 encrypted collection, synchronization, collector-loss recovery, certified-head discovery and bounded repeated reconciliation, and #63 exact receipt/replay optimization: five strict local low-load runs pass in the latest matrix; heavy/WAN and increased sustainable worker capacity remain unqualified. Restart-safe exact managed certification/reconciliation is locally implemented; the complete fresh private-invite real-server founderless sleep/wake gate now passes. Continue installed-client acceptance, exclusive-turn signed durable reference implementation, and stable-host controlled network comparisons and sustained soak. No local reference qualification substitutes for these gates. Ownerless gameplay stays disabled until canonical authority, admission and field gates are met. The #63 complete service, independent quorum, physical, compatibility and actual Minecraft gameplay gates remain open.

@@ -56,7 +56,7 @@ fn hosting_capacity_for_process_test() -> bool {
                     || error.to_string().contains("cannot safely establish"),
                 "unexpected memory-probe error: {error}"
             );
-            eprintln!("Host process scenario requires >=3840 MiB currently available; low-memory runner correctly denies capacity: {error}");
+            eprintln!("Host process scenario requires the current production memory budget; low-memory runner correctly denies capacity: {error}");
             false
         }
     }
@@ -507,7 +507,7 @@ mod hosted_live {
     use super::*;
     use std::{
         io::{Read, Write},
-        net::TcpStream,
+        net::{IpAddr, Ipv4Addr, TcpStream},
         os::unix::process::CommandExt,
     };
     use swarm_cli::game_route_api::GameRouteStatusV1;
@@ -533,6 +533,10 @@ mod hosted_live {
     }
 
     fn spawn(peer: &PeerFixture, port: u16, addresses: &[String]) -> LiveDaemon {
+        spawn_at(peer, Ipv4Addr::LOCALHOST, port, addresses, false)
+    }
+
+    fn spawn_at(peer: &PeerFixture, ip: Ipv4Addr, port: u16, addresses: &[String], replica_only: bool) -> LiveDaemon {
         let log_path = peer.paths.root.join("hosted-daemon.log");
         let log = fs::File::create(&log_path).unwrap();
         let mut command = Command::new(env!("CARGO_BIN_EXE_swarmcraft"));
@@ -541,11 +545,14 @@ mod hosted_live {
             .arg(&peer.paths.root)
             .arg("daemon")
             .arg("--listen")
-            .arg(format!("/ip4/127.0.0.1/udp/{port}/quic-v1"))
+            .arg(format!("/ip4/{ip}/udp/{port}/quic-v1"))
             .env("RUST_LOG", "info,swarm_network::game_transport=debug,swarm_cli::live_authority=debug")
             .stdout(log.try_clone().unwrap())
             .stderr(log)
             .process_group(0);
+        if replica_only {
+            command.arg("--replica-only");
+        }
         for address in addresses {
             command.arg("--peer").arg(address);
         }
@@ -816,5 +823,235 @@ mod hosted_live {
         assert!(!report.safe_to_shutdown, "offline voter has not acknowledged the sleep boundary");
         reconnect_probe(&carol, world, &endpoint, None);
         println!("\nHOSTED_LIVE_GATEWAY_RECOVERY_PASS");
+    }
+
+    #[test]
+    #[ignore = "requires official managed Minecraft, candidate Fabric artifact and a private LAN listener"]
+    fn fresh_private_invite_real_sleep_and_founderless_wake() {
+        assert!(hosting_capacity_for_process_test(), "real server gate requires sufficient memory");
+        assert!(std::env::var_os("SWARMCRAFT_FABRIC_MOD_JAR").is_some(), "candidate Fabric artifact is mandatory");
+        // A real route-selected LAN listener is necessary because invitation
+        // address validation deliberately rejects loopback. No packets are
+        // sent by this UDP route lookup. Do not use a public listener.
+        let route = UdpSocket::bind("0.0.0.0:0").unwrap();
+        route.connect("1.1.1.1:53").unwrap();
+        let IpAddr::V4(ip) = route.local_addr().unwrap().ip() else { panic!("IPv4 private LAN required") };
+        assert!(ip.is_private(), "private LAN listener required; refusing public interface");
+        drop(route);
+        let founder = peer(private_peer_dir());
+        let successor = peer(private_peer_dir());
+        let replica = peer(private_peer_dir());
+        let peers = [&founder, &successor, &replica];
+        let sockets = (0..3).map(|_| UdpSocket::bind((ip, 0)).unwrap()).collect::<Vec<_>>();
+        let ports = sockets.iter().map(|s| s.local_addr().unwrap().port()).collect::<Vec<_>>();
+        let addresses = peers
+            .iter()
+            .zip(&ports)
+            .map(|(peer, port)| {
+                let key = load_or_create_transport_key(&peer.paths.transport_key()).unwrap();
+                format!("/ip4/{ip}/udp/{port}/quic-v1/p2p/{}", key.public().to_peer_id())
+            })
+            .collect::<Vec<_>>();
+        drop(sockets);
+        let created = run_cli_ok(
+            &founder,
+            &[
+                "world",
+                "create",
+                "--name",
+                "Private real invite and wake lab",
+                "--minecraft",
+                "26.1.2",
+                "--fabric-loader",
+                "0.19.3",
+                "--visibility",
+                "private",
+            ],
+        );
+        let world: WorldId = created.lines().find_map(|line| line.strip_prefix("World ID: ")).unwrap().parse().unwrap();
+        let id = world.to_string();
+        let initial = founder.storage.load_epoch_record(world).unwrap();
+        assert_eq!(initial.epoch_number, 1);
+        assert_eq!(founder.storage.load_membership_record(world).unwrap().members.len(), 1);
+        assert!(successor.storage.load_world(world).is_err());
+        assert!(replica.storage.load_world(world).is_err());
+        let founder_daemon = spawn_at(&founder, ip, ports[0], &[], false);
+        let successor_daemon = spawn_at(&successor, ip, ports[1], &[], false);
+        let replica_daemon = spawn_at(&replica, ip, ports[2], &[], true);
+
+        // Use real daemon-published connectivity diagnostics, no seeded
+        // address file or manual --bootstrap on the invitation.
+        let mut token = String::new();
+        eventually("ordinary invitation with actual live connectivity", &peers, || {
+            let output = run_cli(&founder, &["invite", "create", &id]);
+            if !output.status.success() {
+                return false;
+            }
+            let candidate = String::from_utf8(output.stdout).unwrap().trim().to_owned();
+            let Some(encoded) = candidate.strip_prefix("scinvite:") else { return false };
+            let Ok(bytes) = hex::decode(encoded) else { return false };
+            let Ok(grant) = postcard::from_bytes::<swarm_protocol::InviteV1>(&bytes) else { return false };
+            if grant.world_id != world
+                || !grant.bootstrap_addrs.iter().any(|hint| {
+                    // The native diagnostics may publish the listener without
+                    // a /p2p suffix; the signed invitation independently pins
+                    // the application identity, not the libp2p identity.
+                    hint == &addresses[0] || hint == &format!("/ip4/{ip}/udp/{}/quic-v1", ports[0])
+                })
+                || swarm_core::verify_invite_signature(&grant).is_err()
+            {
+                return false;
+            }
+            token = candidate;
+            true
+        });
+        for (index, entrant) in [(1, &successor), (2, &replica)] {
+            let mut args = vec!["world", "join", token.as_str()];
+            if index == 1 {
+                args.push("--host-candidate");
+            }
+            let joined = run_cli(entrant, &args);
+            assert!(joined.status.success(), "fresh invite admission request failed");
+            assert!(String::from_utf8_lossy(&joined.stdout).contains("Join request staged"));
+            eventually("committed fresh invitation and verified replica", &peers, || {
+                let Ok(membership) = founder.storage.load_membership_record(world) else { return false };
+                let Ok(Some(head)) = founder.storage.latest_snapshot(world) else { return false };
+                membership.sequence == index as u64
+                    && membership.members.len() == index + 1
+                    && peers[..=index].iter().all(|peer| {
+                        peer.storage.load_membership_record(world).ok().as_ref() == Some(&membership)
+                            && peer.storage.latest_snapshot(world).ok().flatten().as_ref() == Some(&head)
+                            && peer.storage.verify_snapshot(&head).is_ok()
+                            && peer.storage.load_epoch_record(world).ok().as_ref() == Some(&initial)
+                            && peer.storage.load_pending_join(world).is_err()
+                    })
+            });
+        }
+        let membership = founder.storage.load_membership_record(world).unwrap();
+        assert!(membership.members.iter().any(|m| m.peer_id == successor.identity.peer_id() && m.authority_eligible));
+        assert!(membership.members.iter().any(|m| m.peer_id == replica.identity.peer_id() && !m.authority_eligible));
+        for peer in peers {
+            assert!(swarm_cli::hosting_budget::load_consent(&peer.paths, world).unwrap().is_none());
+            assert!(peer.storage.load_membership_certificate_chain(world).is_ok_and(|chain| chain.len() == 2));
+            assert!(run_cli_ok(peer, &["world", "verify", &id]).contains("Verified checkpoint:"));
+        }
+        println!("\nFRESH_PRIVATE_INVITATION_PASS");
+        // Use the actual native install, verify and explicit contribution
+        // commands, not a fixture that writes Ready or consent records.
+        for host in [&successor, &founder] {
+            runtime(host, &["install", &id, "--accept-eula"]);
+            run_cli_ok(host, &["world", "hosting", "set", &id, "--heap-mib", "512"]);
+            // Consent changes intentionally invalidate artifact verification.
+            // The future host must independently re-verify AFTER opt-in.
+            let verified: serde_json::Value = serde_json::from_str(&runtime(host, &["verify", &id])).unwrap();
+            assert_eq!(verified["ready"], true);
+        }
+        eventually("fresh player gateway selected", &peers, || {
+            run_cli(&replica, &["world", "game-route-select", &id]).status.success()
+        });
+        let endpoint = verified_route(&replica, world, &founder, 1, &peers);
+        minecraft_status(&endpoint);
+        reconnect_probe(&replica, world, &endpoint, Some((&founder, 1)));
+        assert!(!replica.paths.root.join("runtime").join(world.to_hex()).exists());
+        let relative = Path::new("runtime").join(world.to_hex()).join("world").join("fresh-invite-wake-marker.txt");
+        let marker = b"actual server save before original founder sleeps\n";
+        fs::write(founder.paths.root.join(&relative), marker).unwrap();
+        run_cli_ok(&founder, &["world", "stop", &id]);
+        eventually("all three exact signed sleep receipts and green founder shutdown", &peers, || {
+            let Ok(saved) = founder.storage.load_sleep_record(world) else { return false };
+            let all_saved = peers.iter().all(|peer| {
+                peer.storage.load_sleep_record(world).ok().as_ref() == Some(&saved)
+                    && peer.storage.latest_snapshot(world).is_ok_and(|m| {
+                        m.is_some_and(|m| {
+                            m.manifest_hash().ok() == Some(saved.latest_snapshot_hash)
+                                && peer.storage.verify_snapshot(&m).is_ok()
+                        })
+                    })
+            });
+            all_saved
+                && swarm_cli::host_readiness::load_host_readiness_report(&founder.paths, world).is_ok_and(|report| {
+                    report.safe_to_shutdown && report.state == swarm_cli::host_readiness::HostReadinessState::Sleeping
+                })
+        });
+        let sleep = founder.storage.load_sleep_record(world).unwrap();
+        let sleep_manifest = founder.storage.latest_snapshot(world).unwrap().unwrap();
+        swarm_core::lifecycle::verify_sleep_record_signature(&sleep).unwrap();
+        assert_eq!(sleep.latest_snapshot_hash, sleep_manifest.manifest_hash().unwrap());
+        reconnect_probe(&replica, world, &endpoint, None);
+        assert!(peers.iter().all(|peer| !swarm_cli::authority_permit::permit_path(&peer.paths, world).exists()));
+        println!("\nREAL_ALL_PEERS_SLEEP_PASS");
+
+        // All three processes stop. Founder never returns, not even as a
+        // voter. First start the successor alone and prove no wake occurs.
+        drop((founder_daemon, successor_daemon, replica_daemon));
+        let _successor_restarted = spawn_at(&successor, ip, ports[1], &[], false);
+        run_cli_ok(&successor, &["world", "wake", &id]);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            assert_eq!(successor.storage.load_epoch_record(world).unwrap(), initial);
+            assert_eq!(successor.storage.load_sleep_record(world).unwrap(), sleep);
+            assert!(!swarm_cli::authority_permit::permit_path(&successor.paths, world).exists());
+            assert!(!load_migration_status(&successor.paths, world).is_ok_and(|state| state.runtime_ready));
+            thread::sleep(Duration::from_millis(250));
+        }
+        println!("\nSINGLE_SURVIVOR_WAKE_REFUSED");
+        // Model an explicitly reachable already-known private peer after
+        // restart; no invitation rejoin, founder, or fabricated sleep data.
+        let _replica_restarted = spawn_at(&replica, ip, ports[2], &addresses[1..2], true);
+        assert!(!run_cli(&replica, &["world", "wake", &id]).status.success());
+        eventually("same player gateway selected after restart", &peers, || {
+            run_cli(&replica, &["world", "game-route-select", &id]).status.success()
+        });
+        eventually("founderless real Fabric runtime ready", &peers, || {
+            load_migration_status(&successor.paths, world).is_ok_and(|status| {
+                status.runtime_ready
+                    && status.epoch == Some(2)
+                    && status.trigger == Some(swarm_cli::migration::MigrationTrigger::WorldWake)
+            })
+        });
+        let epoch = successor.storage.load_epoch_record(world).unwrap();
+        assert_eq!(epoch.mode, EpochMode::Recovery);
+        assert_eq!(epoch.reason, "quorum wake from exact durable sleep boundary");
+        assert_eq!(epoch.fencing_token, initial.fencing_token + 1);
+        let certificate = successor.storage.load_recovery_certificate(world).unwrap();
+        assert_eq!(certificate.ballot.base_snapshot_hash, sleep.latest_snapshot_hash);
+        assert_eq!(certificate.ballot.base_state_hash, sleep_manifest.state_root);
+        assert_eq!(
+            certificate.unique_voters(),
+            [successor.identity.peer_id(), replica.identity.peer_id()].into_iter().collect()
+        );
+        swarm_cli::live_authority::verify_playable_epoch(&successor.storage, &epoch).unwrap();
+        assert_eq!(fs::read(successor.paths.root.join(&relative)).unwrap(), marker);
+        assert_eq!(founder.storage.load_epoch_record(world).unwrap(), initial);
+        assert_eq!(founder.storage.load_sleep_record(world).unwrap(), sleep);
+        assert!(!swarm_cli::authority_permit::permit_path(&founder.paths, world).exists());
+        assert!(!swarm_cli::authority_permit::permit_path(&replica.paths, world).exists());
+        assert!(!replica.paths.root.join("runtime").join(world.to_hex()).exists());
+        assert!(swarm_cli::hosting_budget::load_consent(&replica.paths, world).unwrap().is_none());
+        for peer in [&successor, &replica] {
+            assert!(run_cli_ok(peer, &["world", "verify", &id]).contains("Verified checkpoint:"));
+        }
+        println!("\nFOUNDERLESS_REAL_RUNTIME_AND_CHECKPOINT_PASS");
+        let woken_endpoint = verified_route(&replica, world, &successor, 2, &peers);
+        assert_eq!(woken_endpoint, endpoint, "stable gateway changed after all peers restarted");
+        minecraft_status(&woken_endpoint);
+        reconnect_probe(&replica, world, &endpoint, Some((&successor, 2)));
+        println!("\nFOUNDERLESS_REAL_WAKE_PASS");
+        run_cli_ok(&successor, &["world", "stop", &id]);
+        eventually("woken server final safe save and surviving replica", &peers, || {
+            let Ok(saved) = successor.storage.load_sleep_record(world) else { return false };
+            saved.epoch == 2
+                && replica.storage.load_sleep_record(world).ok().as_ref() == Some(&saved)
+                && replica
+                    .storage
+                    .latest_snapshot(world)
+                    .is_ok_and(|head| head.is_some_and(|m| m.manifest_hash().ok() == Some(saved.latest_snapshot_hash)))
+        });
+        reconnect_probe(&replica, world, &endpoint, None);
+        assert!(
+            !swarm_cli::host_readiness::load_host_readiness_report(&successor.paths, world).unwrap().safe_to_shutdown,
+            "absent founder cannot acknowledge the final sleep boundary"
+        );
+        println!("\nFOUNDERLESS_REAL_FINAL_SLEEP_PASS");
     }
 }

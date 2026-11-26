@@ -10,6 +10,67 @@ fn identity(seed: u8) -> PeerIdentity {
     PeerIdentity::from_secret_bytes([seed; 32])
 }
 
+#[test]
+fn immutable_signature_memoization_requires_every_exact_byte_and_bounds_memory() {
+    let signer = identity(42);
+    let peer = signer.peer_id();
+    let key = signer.public_key();
+    let message = b"historical signature, not a live authorization";
+    let signature = signer.sign(message);
+    let cache = Mutex::new(ImmutableSignatureCache::default());
+    let verify = |peer, key, message: &[u8], signature: &[u8]| {
+        verify_immutable_signature_with_cache(&cache, peer, key, message, signature)
+    };
+    verify(peer, key, message, &signature).unwrap();
+    verify(peer, key, message, &signature).unwrap();
+    assert_eq!(cache.lock().unwrap().0.len(), 1);
+    let mut bad_signature = signature.clone();
+    bad_signature[0] ^= 1;
+    assert!(verify(peer, key, message, &bad_signature).is_err());
+    assert!(verify(peer, key, b"different historical record", &signature).is_err());
+    assert!(verify(identity(43).peer_id(), key, message, &signature).is_err());
+    assert!(verify(peer, identity(43).public_key(), message, &signature).is_err());
+    assert!(verify(peer, key, message, &signature[..63]).is_err());
+    assert_eq!(cache.lock().unwrap().0.len(), 1);
+    let large = vec![42; IMMUTABLE_SIGNATURE_CACHE_MAX_MESSAGE + 1];
+    verify(peer, key, &large, &signer.sign(&large)).unwrap();
+    assert_eq!(cache.lock().unwrap().0.len(), 1);
+    for n in 0..IMMUTABLE_SIGNATURE_CACHE_ENTRIES {
+        let bytes = n.to_le_bytes();
+        verify(peer, key, &bytes, &signer.sign(&bytes)).unwrap();
+    }
+    let original = ImmutableSignature::new(peer, key, message, &signature).unwrap();
+    assert_eq!(cache.lock().unwrap().0.len(), IMMUTABLE_SIGNATURE_CACHE_ENTRIES);
+    assert!(!cache.lock().unwrap().hit(&original));
+    verify(peer, key, message, &signature).unwrap();
+    assert!(cache.lock().unwrap().hit(&original));
+}
+
+#[test]
+fn immutable_signature_poisoned_cache_falls_back_to_cryptography() {
+    let cache = Mutex::new(ImmutableSignatureCache::default());
+    std::thread::scope(|scope| {
+        let _ = scope
+            .spawn(|| {
+                let _guard = cache.lock().unwrap();
+                panic!("test-only cache poison");
+            })
+            .join();
+    });
+    let signer = identity(44);
+    let message = b"exact historical record";
+    let signature = signer.sign(message);
+    verify_immutable_signature_with_cache(&cache, signer.peer_id(), signer.public_key(), message, &signature).unwrap();
+    assert!(verify_immutable_signature_with_cache(
+        &cache,
+        signer.peer_id(),
+        signer.public_key(),
+        b"mutated",
+        &signature,
+    )
+    .is_err());
+}
+
 fn initial_membership(identities: &[PeerIdentity]) -> DiscoveryMembershipProofV1 {
     initial_membership_with_fingerprint(identities, Hash32([7; 32]))
 }
@@ -92,6 +153,14 @@ fn signed_membership_certificates_require_unique_voters_and_bounded_history() {
     votes.sort_by_key(|vote| vote.voter_peer_id);
     proof.current_membership = proposed;
     proof.membership_certificates = vec![MembershipCertificateV1 { proposal, votes }];
+    verify_genesis_anchored_membership(&proof).unwrap();
+
+    // Warm historical signature entries must not authorize a byte-mutated
+    // certificate even if its quorum shape and proposal are unchanged.
+    let mut tampered = proof.clone();
+    tampered.membership_certificates[0].votes[0].signature[0] ^= 1;
+    validate_discovery_membership_proof_shape(&tampered).unwrap();
+    assert!(verify_genesis_anchored_membership(&tampered).is_err());
     verify_genesis_anchored_membership(&proof).unwrap();
 
     let mut repeated = proof.clone();
@@ -791,6 +860,16 @@ fn canonical_route_requires_signed_majority_and_current_host_consent() {
         storage.world_dir(world).join("metadata/recovery-certificate.postcard")
     };
     let certificate_bytes = fs::read(&certificate_path).unwrap();
+    let mut tampered: swarm_protocol::RecoveryCertificateV1 = postcard::from_bytes(&certificate_bytes).unwrap();
+    tampered.votes[0].signature[0] ^= 1;
+    // The stored ballot and vote semantics are still valid: the changed
+    // signature itself must fail even after the original proof warmed
+    // the historical verifier.
+    fs::write(&certificate_path, postcard::to_allocvec(&tampered).unwrap()).unwrap();
+    assert_eq!(storage.load_recovery_certificate(world).unwrap(), tampered);
+    assert!(verify_playable_epoch(&storage, &next_epoch).is_err());
+    fs::write(&certificate_path, &certificate_bytes).unwrap();
+    verify_playable_epoch(&storage, &next_epoch).unwrap();
     fs::remove_file(&certificate_path).unwrap();
     assert!(verify_playable_epoch(&storage, &next_epoch).is_err());
     fs::write(certificate_path, certificate_bytes).unwrap();

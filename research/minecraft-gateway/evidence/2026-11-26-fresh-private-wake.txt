@@ -1,0 +1,43 @@
+Local Linux disposable peer process gate, 26 November 2026
+Original baseline 530ebda1eeb72766d4e9a9a41da5a20e3f5798ae; source pins below identify tested changes.
+Minecraft 26.1.2 / Fabric Loader 0.19.3 / Java 25
+Original full output (before trailing-space normalization) SHA-256: de70752370e8d5893f9e932876a3e968d85d2a1c889cd530c0df6d5630b2d0d9
+Artifact and source SHA-256:
+42c21ff388183d5c3c60d910912300a00c36f8c9e43654cd65ed52957dd5aab0  target/debug/swarmcraft
+6331418001f2430fae185a9c2b10ad27f9b2fd0dfd7f84a21fb7ff58469be5c1  target/debug/swarmcraft-runtime
+2aea434e512fc52d2ec8056c1558cfff45a7bf030693d0ca380f923734b0b3ee  target/debug/deps/manual_transfer_process_gate-61fd8cd12cccfe4f
+f57b0ed3a6101da742304aa0b9efd6ff57f65732588a7d9b814029291a34b073  minecraft/fabric/build/libs/swarmcraft-fabric-0.5.1.jar
+9bcf72fe09527aec7e334359e520eae97acac594d4ed27ffdebfccfd15acd591  minecraft/fabric/build/client-reconnect/swarmcraft-fabric-reconnect-0.5.1.jar
+4c42e4c0ced992a42f115eb8b7e44397a5bdbbabb5acee9fd173275fdb091aa0  minecraft/fabric/build/client-reconnect-test/swarmcraft-reconnect-live-probe-test-only-0.5.1.jar
+b4588be1fa470cb3c109e5aceb03e4a033fda19787d38b90011c197a6f59209b  crates/swarm-cli/src/live_authority.rs
+ce6974cd354ca094717c527227abd3f4004a0c73bd9fe57856247e45367ef024  crates/swarm-cli/src/live_authority_tests.rs
+e19abb8ef8e8b82ab204d456785ccc6abe81fc035722e459c338f5d17b940d25  crates/swarm-cli/tests/manual_transfer_process_gate.rs
+
+   Compiling swarm-cli v0.5.1 (/home/mousa/projects/my-creations/swarmcraft/swarmcraft/.worktrees/sabathon-p0-integration-20261123/crates/swarm-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 41.15s
+     Running tests/manual_transfer_process_gate.rs (target/debug/deps/manual_transfer_process_gate-61fd8cd12cccfe4f)
+
+running 1 test
+test hosted_live::fresh_private_invite_real_sleep_and_founderless_wake ...
+FRESH_PRIVATE_INVITATION_PASS
+JAVA_RECONNECT_STATUS_PASS epoch=1
+JAVA_RECONNECT_REFUSAL_PASS
+
+REAL_ALL_PEERS_SLEEP_PASS
+
+SINGLE_SURVIVOR_WAKE_REFUSED
+
+FOUNDERLESS_REAL_RUNTIME_AND_CHECKPOINT_PASS
+JAVA_RECONNECT_STATUS_PASS epoch=2
+
+FOUNDERLESS_REAL_WAKE_PASS
+JAVA_RECONNECT_REFUSAL_PASS
+
+FOUNDERLESS_REAL_FINAL_SLEEP_PASS
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 173.35s
+
+
+All three disposable peer profiles removed; no hosted CI.
+Scope: real native server and Minecraft status protocol, not authenticated gameplay, installed UI, or independent physical devices.

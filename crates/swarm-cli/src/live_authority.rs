@@ -12,9 +12,9 @@ use anyhow::{anyhow, bail, Context, Result};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, VecDeque},
     fs::OpenOptions,
-    sync::Arc,
+    sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use swarm_consensus::{
@@ -26,8 +26,7 @@ use swarm_core::{
         verify_discovery_freshness_vote, MAX_DISCOVERY_FRESHNESS_VOTES, MAX_DISCOVERY_MEMBERS,
         MAX_DISCOVERY_MEMBERSHIP_CERTIFICATES,
     },
-    protocol_v2::verify_world_config_signature,
-    verify_membership_signature, verify_signature, verify_snapshot_signature, DataPaths, PeerIdentity,
+    verify_signature, DataPaths, PeerIdentity,
 };
 use swarm_network::{
     game_route::{FreshAuthorityEvidence, FreshAuthoritySource, GameRouteError},
@@ -50,6 +49,95 @@ const HOST_FABRIC_SIGN_DOMAIN: &[u8] = b"swarmcraft/game-host-fabric-attestation
 const MAX_FRESH_PROOF_MS: u64 = 3_000;
 const MAX_SIGNED_RUNTIME_MS: u64 = 3_000;
 const CLOCK_SKEW_MS: u64 = 500;
+
+// Historical signatures have no clock, lease or mutable authorization
+// state. Memoize only successful checks of the COMPLETE signature inputs,
+// not record hashes (which may omit a signature), role/epoch decisions,
+// quorum results, files, or live attestations. All durable reads, semantic
+// checks, membership/recovery shape checks and fresh proof deadlines
+// remain mandatory, including on a hit. Never consult a persisted cache.
+const IMMUTABLE_SIGNATURE_CACHE_ENTRIES: usize = 128;
+const IMMUTABLE_SIGNATURE_CACHE_MAX_MESSAGE: usize = 64 * 1024;
+
+#[derive(PartialEq, Eq)]
+struct ImmutableSignature {
+    peer: PeerId,
+    key: [u8; 32],
+    message: Vec<u8>,
+    signature: [u8; 64],
+}
+
+impl ImmutableSignature {
+    fn new(peer: PeerId, key: [u8; 32], message: &[u8], signature: &[u8]) -> Option<Self> {
+        if message.len() > IMMUTABLE_SIGNATURE_CACHE_MAX_MESSAGE {
+            return None;
+        }
+        Some(Self { peer, key, message: message.to_vec(), signature: signature.try_into().ok()? })
+    }
+}
+
+#[derive(Default)]
+struct ImmutableSignatureCache(VecDeque<ImmutableSignature>);
+
+impl ImmutableSignatureCache {
+    fn hit(&mut self, entry: &ImmutableSignature) -> bool {
+        if let Some(index) = self.0.iter().position(|candidate| candidate == entry) {
+            // Exact byte equality, not a digest or metadata shortcut.
+            if let Some(previous) = self.0.remove(index) {
+                self.0.push_back(previous);
+                return true;
+            }
+        }
+        false
+    }
+
+    // Private to this verifier: call only after the original cryptographic
+    // verifier has succeeded. Do not hold the lock while verifying.
+    fn remember_verified(&mut self, entry: ImmutableSignature) {
+        if !self.hit(&entry) {
+            if self.0.len() >= IMMUTABLE_SIGNATURE_CACHE_ENTRIES {
+                self.0.pop_front();
+            }
+            self.0.push_back(entry);
+        }
+    }
+}
+
+static IMMUTABLE_SIGNATURES: OnceLock<Mutex<ImmutableSignatureCache>> = OnceLock::new();
+
+fn verify_immutable_signature(peer: PeerId, key: [u8; 32], message: &[u8], signature: &[u8]) -> Result<()> {
+    verify_immutable_signature_with_cache(
+        IMMUTABLE_SIGNATURES.get_or_init(Default::default),
+        peer,
+        key,
+        message,
+        signature,
+    )
+}
+
+fn verify_immutable_signature_with_cache(
+    cache: &Mutex<ImmutableSignatureCache>,
+    peer: PeerId,
+    key: [u8; 32],
+    message: &[u8],
+    signature: &[u8],
+) -> Result<()> {
+    let entry = ImmutableSignature::new(peer, key, message, signature);
+    if let Some(entry) = entry.as_ref() {
+        if cache.lock().is_ok_and(|mut cache| cache.hit(entry)) {
+            return Ok(());
+        }
+    }
+    // Oversized/malformed inputs and poisoned caches use the original
+    // verifier; failures never populate the cache.
+    verify_signature(peer, key, message, signature)?;
+    if let Some(entry) = entry {
+        if let Ok(mut cache) = cache.lock() {
+            cache.remember_verified(entry);
+        }
+    }
+    Ok(())
+}
 
 /// Exact, signed canonical head that was used to restore and authorize this
 /// runtime instance. The daemon must derive it from current accepted records,
@@ -316,14 +404,26 @@ impl SignedLiveAuthoritySource {
         let head = require_current_canonical_generation(&storage, world, proof)?;
 
         proof.epoch.validate_semantics()?;
-        verify_signature(
+        verify_immutable_signature(
             proof.epoch.authority_peer_id,
             proof.epoch.authority_public_key,
             &proof.epoch.signing_bytes()?,
             &proof.epoch.signature,
         )?;
-        verify_world_config_signature(&proof.config)?;
-        verify_snapshot_signature(&proof.snapshot)?;
+        proof.config.validate_semantics()?;
+        verify_immutable_signature(
+            proof.config.authority_peer_id,
+            proof.config.authority_public_key,
+            &proof.config.signing_bytes()?,
+            &proof.config.signature,
+        )?;
+        proof.snapshot.validate_semantics()?;
+        verify_immutable_signature(
+            proof.snapshot.authority_peer_id,
+            proof.snapshot.authority_public_key,
+            &proof.snapshot.signing_bytes()?,
+            &proof.snapshot.signature,
+        )?;
         // A signed manifest alone does not prove that this replica still has
         // the exact readable checkpoint bytes. Validate the complete local
         // blob set before authorizing a route. This may be expensive for large
@@ -739,7 +839,12 @@ pub fn verify_genesis_anchored_membership(proof: &DiscoveryMembershipProofV1) ->
             {
                 bail!("membership certificate has mismatched or repeated voters");
             }
-            verify_signature(vote.voter_peer_id, vote.voter_public_key, &vote.signing_bytes()?, &vote.signature)?;
+            verify_immutable_signature(
+                vote.voter_peer_id,
+                vote.voter_public_key,
+                &vote.signing_bytes()?,
+                &vote.signature,
+            )?;
         }
         previous = &certificate.proposal.proposed;
     }
@@ -758,7 +863,12 @@ pub fn verify_genesis_anchored_membership(proof: &DiscoveryMembershipProofV1) ->
 
 fn verify_membership_record_and_keys(record: &MembershipRecordV1) -> Result<()> {
     record.validate_semantics()?;
-    verify_membership_signature(record)?;
+    verify_immutable_signature(
+        record.authority_peer_id,
+        record.authority_public_key,
+        &record.signing_bytes()?,
+        &record.signature,
+    )?;
     for member in &record.members {
         if member.peer_id != peer_id_from_public_key(&member.public_key) {
             bail!("membership contains a key that does not match its canonical peer ID");
@@ -774,7 +884,13 @@ pub fn verify_current_recovery_certificate(
 ) -> Result<()> {
     let certificate = storage.load_recovery_certificate(epoch.world_id)?;
     let ballot = &certificate.ballot;
-    swarm_core::protocol_v2::verify_recovery_ballot_signature(ballot)?;
+    ballot.validate_semantics()?;
+    verify_immutable_signature(
+        ballot.candidate_peer_id,
+        ballot.candidate_public_key,
+        &ballot.signing_bytes()?,
+        &ballot.signature,
+    )?;
     // A recovery ballot is signed BEFORE promotion of the membership
     // authority/epoch. Its hash must refer to that exact archived record,
     // not the successor's newly signed membership record.
@@ -802,7 +918,8 @@ pub fn verify_current_recovery_certificate(
     }
     let mut seen = BTreeSet::new();
     for vote in &certificate.votes {
-        swarm_core::protocol_v2::verify_recovery_vote_signature(vote)?;
+        vote.validate_semantics()?;
+        verify_immutable_signature(vote.voter_peer_id, vote.voter_public_key, &vote.signing_bytes()?, &vote.signature)?;
         if !seen.insert(vote.voter_peer_id)
             || !base.members.iter().any(|member| {
                 !member.banned && member.peer_id == vote.voter_peer_id && member.public_key == vote.voter_public_key
@@ -894,7 +1011,12 @@ pub fn verify_playable_epoch(storage: &Storage, epoch: &EpochRecordV1) -> Result
     if storage.load_epoch_record(epoch.world_id)? != *epoch {
         bail!("playable epoch is no longer the locally accepted generation");
     }
-    verify_signature(epoch.authority_peer_id, epoch.authority_public_key, &epoch.signing_bytes()?, &epoch.signature)?;
+    verify_immutable_signature(
+        epoch.authority_peer_id,
+        epoch.authority_public_key,
+        &epoch.signing_bytes()?,
+        &epoch.signature,
+    )?;
     if epoch.mode == EpochMode::Quorum {
         return Ok(());
     }
