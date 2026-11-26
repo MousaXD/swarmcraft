@@ -315,3 +315,87 @@ behavior but cannot prove online overlap. Neither transport establishes
 actual Minecraft checkpoint verification, quiescence, generation fencing,
 game-stream closure, resource consent, installed clients or production
 activation. Ordinary quorum worlds are unchanged.
+
+### Real reference process and route fencing
+
+The bounded `exclusive-turn writer` service is a separate **opaque-state
+reference process**, not a Minecraft launcher. It holds the existing
+stable journal lock for its whole lifetime. The listener and every
+accepted TCP stream belong to that process; there is no detached worker
+or child process. No ordinary world, runtime directory, control record,
+Fabric permit or game gateway is created. A live writer therefore blocks
+all other supported journal operations, including checkpoint replacement,
+preparation, commitment, network handoff and another writer launch.
+Before preparing a handoff the operator must stop the writer and acquire
+the same lock. In-process execution can make no further state mutations
+after the writer exits, including on SIGKILL.
+
+The holder explicitly authorizes a bounded session service for the other
+fixed device only. Startup independently checks exact world, grant and
+checkpoint pins, verified local Held phase, fixed roster and private
+listener. It accepts 1–32 sessions and a 1–120-second service window,
+with an additional 10-second per-session monotonic I/O bound. Local
+durable I/O is not preempted. Every accepted session rereads the signed
+journal and checks the accepted head, holder, attempt and exact retained
+bytes under the same stable lock. The authenticated Noise prologue binds
+world, grant, epoch, fence, compatibility, holder and client; its
+domains are separate from handoff and ordinary ownerless decisions.
+
+```sh
+swarmcraft --data-dir "$HOLDER_PROFILE" exclusive-turn writer serve \
+  --expected-world "$WORLD" --expected-grant "$GRANT" \
+  --expected-checkpoint "$CURRENT_COMMITMENT" \
+  --from "$OTHER_PEER" --bind 127.0.0.1:0 --max-sessions 2 --confirm
+
+swarmcraft --data-dir "$OTHER_PROFILE" exclusive-turn writer observe \
+  --expected-world "$WORLD" --expected-grant "$GRANT" \
+  --expected-checkpoint "$CURRENT_COMMITMENT" \
+  --peer "$HOLDER_PEER@$LISTENER_ADDRESS" --confirm
+
+swarmcraft --data-dir "$OTHER_PROFILE" exclusive-turn writer replace \
+  --expected-world "$WORLD" --expected-grant "$GRANT" \
+  --expected-checkpoint "$CURRENT_COMMITMENT" \
+  --checkpoint "$NEW_OPAQUE_BYTES" \
+  --peer "$HOLDER_PEER@$LISTENER_ADDRESS" --confirm
+```
+
+Each client generates a fresh request nonce; the holder verifies the
+scope and exact content-based compare-and-swap pin. A replacement is
+bounded to 1 MiB, and the holder independently derives both manifest
+and state-root digests using separate **reference-only** domains, as
+well as verifying the opaque content commitment. It uses the same
+durable checkpoint transition as the local file command. No reply
+precedes the verified durable publication. The signed response binds
+the complete request including nonce, scope and previous commitment
+to the resulting checkpoint. The client verifies all fields and the
+fixed holder's signature. An observation or receipt is not a live
+lease, game authorization, Minecraft snapshot or promise of continued
+availability. Failure terminates the bounded writer service rather
+than continuing on uncertain in-memory state. A lost write reply
+requires fresh observation; stale content CAS refuses. This is not
+exactly-once operation logging and content CAS alone does not detect an
+intentional return to identical earlier bytes within the same grant.
+
+Two new real subprocess regressions exercise authenticated observations
+and mutation, two independent signed nonce receipts, competing writer
+launch and preparation/transfer denial, hard-killing the writer while
+its TCP handshake is open, closure of the old connection and listener,
+cold reload of the exact saved bytes, a real encrypted handoff whose
+committed release is lost, denial of both devices while the grant is
+in flight, exact outbox retry, and a fresh recipient writer at epoch
+and fence 2. Another fault proxy drops an already durable write
+response, then verifies byte-identical journal retention, stale CAS
+denial and new signed observations. All six exclusive-turn process
+tests passed in the first run (34.82 seconds). The final lint-clean
+run passed all six again (31.71 seconds), plus 210 enabled CLI library
+tests (three delegated cgroup tests ignored), strict Clippy, formatting
+and workflow/release checks. [Retained test output and source/artifact pins](../../research/exclusive-turn/evidence/2026-11-26-opaque-writer-fencing.txt).
+
+This qualifies only a single in-process reference writer on disposable
+Linux profiles. It does not prove JVM/descendant quiescence, real
+Minecraft save integrity, production hosting consent, game-stream
+fencing, or independent physical host behavior. The actual runtime
+adapter must retain the machine-wide hosting reservation, verified
+supervised process ownership, real checkpoint barrier and Fabric
+attestation; opaque digests or a reference writer lock cannot substitute
+for those requirements. No normal hosting admission was relaxed.

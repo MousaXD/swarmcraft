@@ -582,6 +582,12 @@ impl Server {
     fn finish(mut self) -> Output {
         self.0.take().unwrap().wait_with_output().unwrap()
     }
+
+    fn kill(mut self) -> Output {
+        let mut child = self.0.take().unwrap();
+        child.kill().unwrap();
+        child.wait_with_output().unwrap()
+    }
 }
 
 impl Fixture {
@@ -785,6 +791,379 @@ fn confirmed(
         .verify_strict(&bytes, &Signature::from_slice(&signature).unwrap())
         .unwrap();
     result
+}
+
+impl Fixture {
+    fn writer(&self, device: usize, action: &str, grant: &str, checkpoint: &str) -> Command {
+        cmd(
+            &self.profiles[device],
+            &[
+                "writer",
+                action,
+                "--expected-world",
+                &self.world,
+                "--expected-grant",
+                grant,
+                "--expected-checkpoint",
+                checkpoint,
+                "--confirm",
+            ],
+        )
+    }
+
+    fn writer_serve(&self, holder: usize, grant: &str, checkpoint: &str, sessions: u32) -> Command {
+        let mut command = self.writer(holder, "serve", grant, checkpoint);
+        command.args([
+            "--from",
+            &self.identities[1 - holder].peer_id().to_string(),
+            "--bind",
+            "127.0.0.1:0",
+            "--max-sessions",
+            &sessions.to_string(),
+            "--run-seconds",
+            "60",
+        ]);
+        command
+    }
+
+    fn writer_listener(
+        &self,
+        holder: usize,
+        grant: &str,
+        checkpoint: &str,
+        epoch: u64,
+        sessions: u32,
+    ) -> (Server, SocketAddr) {
+        let child = self
+            .writer_serve(holder, grant, checkpoint, sessions)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut server = Server(Some(child));
+        let mut line = String::new();
+        BufReader::new(server.0.as_mut().unwrap().stdout.as_mut().unwrap()).read_line(&mut line).unwrap();
+        assert!(!line.is_empty(), "writer listener did not become ready: {:?}", server.0.as_mut().unwrap().try_wait());
+        let ready: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(ready["classification"], "exclusive_turn_opaque_writer_listener");
+        assert_eq!(ready["grant"], grant);
+        assert_eq!(ready["world_id"], self.world);
+        assert_eq!(ready["holder"], self.identities[holder].peer_id().to_string());
+        assert_eq!(ready["client"], self.identities[1 - holder].peer_id().to_string());
+        assert_eq!(ready["reference_epoch"], epoch);
+        assert_eq!(ready["reference_fence"], epoch);
+        assert_eq!(ready["writer_pid"], server.0.as_ref().unwrap().id());
+        assert_eq!(ready["runtime_activation"], false);
+        (server, ready["address"].as_str().unwrap().parse().unwrap())
+    }
+
+    fn writer_request(
+        &self,
+        client: usize,
+        grant: &str,
+        checkpoint: &str,
+        address: SocketAddr,
+        replacement: Option<&Path>,
+    ) -> Output {
+        let mut command =
+            self.writer(client, if replacement.is_some() { "replace" } else { "observe" }, grant, checkpoint);
+        command.args(["--peer", &format!("{}@{address}", self.identities[1 - client].peer_id())]);
+        if let Some(file) = replacement {
+            command.args(["--checkpoint", path(file)]);
+        }
+        command.output().unwrap()
+    }
+}
+
+// Independently deserialize the exact signed receipt with a separate
+// test-side schema and verify the real holder's Ed25519 signature.
+fn writer_receipt(
+    output: Output,
+    f: &Fixture,
+    holder: usize,
+    grant: &str,
+    epoch: u64,
+    checkpoints: (Hash32, Hash32),
+    changed: bool,
+) -> [u8; 32] {
+    let (previous, expected) = checkpoints;
+    use ed25519_dalek::{Signature, VerifyingKey};
+    #[derive(serde::Deserialize, serde::Serialize)]
+    struct Scope {
+        world: ExclusiveTurnWorldIdV1,
+        grant: Hash32,
+        epoch: u64,
+        fence: u64,
+        compatibility: Hash32,
+        holder: PeerId,
+        client: PeerId,
+    }
+    #[derive(serde::Deserialize, serde::Serialize)]
+    struct Request {
+        scope: Scope,
+        nonce: [u8; 32],
+        expected_checkpoint: Hash32,
+        replacement: Option<ExclusiveTurnCheckpointV1>,
+    }
+    #[derive(serde::Deserialize, serde::Serialize)]
+    struct Body {
+        request: Request,
+        checkpoint: ExclusiveTurnCheckpointV1,
+    }
+    let result = json(output);
+    assert_eq!(result["classification"], "exclusive_turn_opaque_writer_receipt");
+    assert_eq!(result["grant"], grant);
+    assert_eq!(result["world_id"], f.world);
+    assert_eq!(result["reference_epoch"], epoch);
+    assert_eq!(result["reference_fence"], epoch);
+    for flag in ["canonical_authority", "write_authority", "runtime_activation", "player_admission", "freshness_lease"]
+    {
+        assert_eq!(result[flag], false);
+    }
+    let body: Body = serde_json::from_value(result["receipt"]["body"].clone()).unwrap();
+    assert_eq!(body.request.scope.world.to_string(), f.world);
+    assert_eq!(body.request.scope.grant.to_string(), grant);
+    assert_eq!(body.request.scope.epoch, epoch);
+    assert_eq!(body.request.scope.fence, epoch);
+    assert_eq!(body.request.scope.compatibility, Hash32([3; 32]));
+    assert_eq!(body.request.scope.holder, f.identities[holder].peer_id());
+    assert_eq!(body.request.scope.client, f.identities[1 - holder].peer_id());
+    assert_eq!(body.request.expected_checkpoint, previous);
+    assert_eq!(body.checkpoint.reference_commitment, expected);
+    assert_eq!(body.request.replacement, changed.then_some(body.checkpoint));
+    assert_ne!(body.request.nonce, [0; 32]);
+    let mut signed = b"swarmcraft/exclusive-turn/opaque-writer-receipt/v1\0".to_vec();
+    signed.extend(postcard::to_allocvec(&body).unwrap());
+    let signature: Vec<u8> = serde_json::from_value(result["receipt"]["signature"].clone()).unwrap();
+    VerifyingKey::from_bytes(&f.identities[holder].public_key())
+        .unwrap()
+        .verify_strict(&signed, &Signature::from_slice(&signature).unwrap())
+        .unwrap();
+    body.request.nonce
+}
+
+// Real encrypted exchange with a lost final reply. The proxy forwards
+// the exact request and opaque replacement but withholds the receipt
+// after the real writer has completed its durable publication.
+fn lose_writer_reply(target: SocketAddr) -> (SocketAddr, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let handle = thread::spawn(move || {
+        listener.set_nonblocking(true).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut source = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline);
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("{error}"),
+            }
+        };
+        let mut dest = TcpStream::connect_timeout(&target, Duration::from_secs(5)).unwrap();
+        for stream in [&source, &dest] {
+            stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            stream.set_write_timeout(Some(Duration::from_secs(10))).unwrap();
+        }
+        forward(&mut source, &mut dest);
+        forward(&mut dest, &mut source);
+        forward(&mut dest, &mut source);
+        forward(&mut source, &mut dest);
+        for _ in 0..4 {
+            forward(&mut source, &mut dest); // request and small checkpoint frames
+        }
+        let _length = frame(&mut dest);
+        let _receipt = frame(&mut dest);
+        let _ = source.shutdown(Shutdown::Both);
+        let _ = dest.shutdown(Shutdown::Both);
+    });
+    (address, handle)
+}
+
+#[test]
+fn real_writer_lock_route_and_crash_fence_survive_network_handoff() {
+    use std::os::unix::process::ExitStatusExt;
+    let f = Fixture::new();
+    let initial = exclusive_turn_reference_commitment(&fs::read(&f.initial).unwrap()).unwrap();
+    let next_bytes = b"durably replaced opaque state before handoff";
+    let next_file = f.put("writer-next.bin", next_bytes);
+    let next = exclusive_turn_reference_commitment(next_bytes).unwrap();
+    let old = initial.to_string();
+    let next_pin = next.to_string();
+
+    // The replica cannot launch even though it has the identical
+    // checkpoint. Exactly one real process may own the local writer.
+    rejected(f.writer_serve(1, &f.initial_grant, &old, 1).output().unwrap(), "not held");
+    let (server, address) = f.writer_listener(0, &f.initial_grant, &old, 1, 8);
+    rejected(f.writer_serve(0, &f.initial_grant, &old, 1).output().unwrap(), "journal busy");
+    rejected(f.mutate(0, "prepare", &f.initial_grant, &["--expected-checkpoint", &old]), "journal busy");
+    rejected(
+        f.mutate(
+            0,
+            "checkpoint",
+            &f.initial_grant,
+            &[
+                "--expected-checkpoint",
+                &old,
+                "--checkpoint",
+                path(&next_file),
+                "--manifest-hash",
+                &Hash32([4; 32]).to_string(),
+                "--state-root",
+                &Hash32([5; 32]).to_string(),
+            ],
+        ),
+        "journal busy",
+    );
+    rejected(
+        f.network(0, "handoff", &f.initial_grant, &Hash32([9; 32]).to_string())
+            .args(["--peer", &format!("{}@127.0.0.1:1", f.identities[1].peer_id())])
+            .output()
+            .unwrap(),
+        "journal busy",
+    );
+    let nonce1 = writer_receipt(
+        f.writer_request(1, &f.initial_grant, &old, address, None),
+        &f,
+        0,
+        &f.initial_grant,
+        1,
+        (initial, initial),
+        false,
+    );
+    let nonce2 = writer_receipt(
+        f.writer_request(1, &f.initial_grant, &old, address, Some(&next_file)),
+        &f,
+        0,
+        &f.initial_grant,
+        1,
+        (initial, next),
+        true,
+    );
+    assert_ne!(nonce1, nonce2);
+    assert_eq!(fs::read(f.state(0, next)).unwrap(), next_bytes);
+    // Keep an actual TCP connection open to the old route, and complete
+    // the first Noise handshake frame so the server has accepted it.
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(3)).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    let mut handshake =
+        snow::Builder::new("Noise_NN_25519_ChaChaPoly_BLAKE2s".parse().unwrap()).build_initiator().unwrap();
+    let mut output = [0; 128];
+    let len = handshake.write_message(&[], &mut output).unwrap();
+    stream.write_all(&(len as u32).to_be_bytes()).unwrap();
+    stream.write_all(&output[..len]).unwrap();
+    let _response = frame(&mut stream);
+    // Hard-kill the process while its old socket is open. There is no
+    // detached process or inherited lock that could keep writing.
+    let killed = server.kill();
+    assert_eq!(killed.status.signal(), Some(9));
+    let mut drained = [0; 4096];
+    loop {
+        match stream.read(&mut drained) {
+            Ok(0) => break,
+            Ok(_) => continue,
+            Err(error)
+                if matches!(error.kind(), std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe) =>
+            {
+                break
+            }
+            Err(error) => panic!("old route did not close: {error}"),
+        }
+    }
+    assert!(TcpStream::connect_timeout(&address, Duration::from_millis(500)).is_err());
+    let held = f.status(0);
+    report(&held, "held", 1);
+    let cp: ExclusiveTurnCheckpointV1 = serde_json::from_value(held["local_checkpoint"].clone()).unwrap();
+    assert_eq!(cp.reference_commitment, next);
+    assert_eq!(
+        cp.manifest_hash,
+        Hash32::from_domain_bytes(b"swarmcraft/exclusive-turn/opaque-writer-manifest/v1\0", next_bytes)
+    );
+    assert_eq!(
+        cp.state_root,
+        Hash32::from_domain_bytes(b"swarmcraft/exclusive-turn/opaque-writer-state/v1\0", next_bytes)
+    );
+    let (offer, bytes) = f.prepare(0, &f.initial_grant, &next_pin);
+    assert_eq!(offer.offer.checkpoint, cp);
+    let hash = offer.offer_hash().unwrap().to_string();
+    let file = f.put("writer-offer.json", &bytes);
+    rejected(f.writer_serve(0, &f.initial_grant, &next_pin, 1).output().unwrap(), "not held");
+    rejected(f.writer_serve(1, &f.initial_grant, &old, 1).output().unwrap(), "not held");
+    // Partition after release, before acceptance: there is no eligible
+    // reference writer on either device until the exact outbox arrives.
+    let (server, target) = f.serve(1, &f.initial_grant, &hash, &file);
+    let (proxy_address, proxy) = fault_proxy(target, WireFault::LoseRelease);
+    rejected(f.send_handoff(0, &f.initial_grant, &hash, proxy_address), "source relinquished");
+    proxy.join().unwrap();
+    assert!(!server.finish().status.success());
+    let released = f.status(0);
+    report(&released, "released", 2);
+    report(&f.status(1), "replica", 1);
+    let grant = released["grant"].as_str().unwrap();
+    rejected(f.writer_serve(0, grant, &next_pin, 1).output().unwrap(), "not held");
+    rejected(f.writer_serve(0, &f.initial_grant, &next_pin, 1).output().unwrap(), "grant differs");
+    rejected(f.writer_serve(1, &f.initial_grant, &old, 1).output().unwrap(), "not held");
+    let (server, target) = f.serve(1, &f.initial_grant, &hash, &file);
+    confirmed(f.send_handoff(0, &f.initial_grant, &hash, target), &f, &offer, grant, 2, 1);
+    success(server.finish());
+    assert_eq!(fs::read(f.state(1, next)).unwrap(), next_bytes);
+    let (server, new_address) = f.writer_listener(1, grant, &next_pin, 2, 1);
+    rejected(f.writer_serve(0, grant, &next_pin, 1).output().unwrap(), "not held");
+    writer_receipt(f.writer_request(0, grant, &next_pin, new_address, None), &f, 1, grant, 2, (next, next), false);
+    success(server.finish());
+    assert!(TcpStream::connect_timeout(&new_address, Duration::from_millis(500)).is_err());
+    f.assert_no_live_storage();
+}
+
+#[test]
+fn writer_lost_ack_keeps_exact_durable_checkpoint_and_rejects_stale_cas() {
+    let f = Fixture::new();
+    let initial = exclusive_turn_reference_commitment(&fs::read(&f.initial).unwrap()).unwrap();
+    let bytes = b"opaque state retained after lost writer acknowledgment";
+    let replacement = f.put("writer-replace.bin", bytes);
+    let next = exclusive_turn_reference_commitment(bytes).unwrap();
+    let old = initial.to_string();
+    let new = next.to_string();
+    let (server, address) = f.writer_listener(0, &f.initial_grant, &old, 1, 1);
+    let (proxy_address, proxy) = lose_writer_reply(address);
+    let output = f.writer_request(1, &f.initial_grant, &old, proxy_address, Some(&replacement));
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    proxy.join().unwrap();
+    success(server.finish());
+    let before = f.snapshot(0);
+    assert_eq!(fs::read(f.state(0, next)).unwrap(), bytes);
+    rejected(f.writer_serve(0, &f.initial_grant, &old, 1).output().unwrap(), "checkpoint differs");
+    let (server, address) = f.writer_listener(0, &f.initial_grant, &new, 1, 1);
+    let stale = f.writer_request(1, &f.initial_grant, &old, address, Some(&f.initial));
+    assert!(!stale.status.success());
+    assert!(stale.stdout.is_empty());
+    rejected(server.finish(), "reference writer checkpoint differs");
+    assert_eq!(f.snapshot(0), before);
+    let (server, address) = f.writer_listener(0, &f.initial_grant, &new, 1, 2);
+    let nonce1 = writer_receipt(
+        f.writer_request(1, &f.initial_grant, &new, address, None),
+        &f,
+        0,
+        &f.initial_grant,
+        1,
+        (next, next),
+        false,
+    );
+    let nonce2 = writer_receipt(
+        f.writer_request(1, &f.initial_grant, &new, address, None),
+        &f,
+        0,
+        &f.initial_grant,
+        1,
+        (next, next),
+        false,
+    );
+    assert_ne!(nonce1, nonce2);
+    success(server.finish());
+    assert_eq!(f.snapshot(0), before);
+    f.assert_no_live_storage();
 }
 
 #[test]

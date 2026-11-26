@@ -1,6 +1,6 @@
 //! Isolated, Linux-only durable reference workflow for Sabathon #8.
-//! No normal world storage, runtime, route, permit, or hosting consent is
-//! opened or created by these commands. The checkpoint is opaque test data.
+//! No normal world storage, Minecraft runtime, game route, permit, or hosting
+//! consent is opened or created. The reference checkpoint is opaque test data.
 use anyhow::{bail, ensure, Context, Result};
 use clap::{Args, Subcommand};
 use ed25519_dalek::{Signature, VerifyingKey};
@@ -17,6 +17,8 @@ use swarm_protocol::*;
 
 #[path = "exclusive_turn_network.rs"]
 mod network;
+#[path = "exclusive_turn_writer.rs"]
+mod writer;
 
 const STORE: &str = "exclusive-turn-reference";
 const JOURNAL_LIMIT: usize = 512 * 1024;
@@ -72,6 +74,11 @@ impl ReferenceCheckpoint {
 
 #[derive(Debug, Subcommand)]
 pub enum ExclusiveTurnCommand {
+    /// Bounded in-process opaque-state writer; never a Minecraft runtime.
+    Writer {
+        #[command(subcommand)]
+        command: writer::WriterCommand,
+    },
     /// Authenticated private reference handoff, not a Minecraft runtime transfer.
     Network {
         #[command(subcommand)]
@@ -567,6 +574,34 @@ fn opened(paths: &DataPaths, pin: &Pin) -> Result<(Store, Journal, VerifiedExclu
     Ok((store, journal, head))
 }
 
+// All checkpoint publications, including the bounded reference writer,
+// must pass the same held-turn compare-and-swap under the journal lock.
+fn replace_checkpoint(
+    store: &Store,
+    journal: &mut Journal,
+    head: &VerifiedExclusiveTurnHead,
+    expected_checkpoint: Hash32,
+    checkpoint: ExclusiveTurnCheckpointV1,
+    bytes: &[u8],
+) -> Result<()> {
+    ensure!(journal.phase == Phase::Held && head.holder() == journal.identity, "reference turn is not held");
+    ensure!(
+        journal.checkpoint.reference_commitment == expected_checkpoint,
+        "local checkpoint differs from expected pin"
+    );
+    checkpoint.verify_reference_bytes(bytes)?;
+    ensure!(
+        checkpoint.reference_commitment != expected_checkpoint || checkpoint == journal.checkpoint,
+        "same opaque bytes cannot substitute checkpoint digest claims"
+    );
+    if checkpoint != journal.checkpoint {
+        store.retain(checkpoint, bytes)?;
+        journal.checkpoint = checkpoint;
+        store.save(head.world(), journal, true)?;
+    }
+    Ok(())
+}
+
 // The file and encrypted transport workflows share exactly the same durable transitions.
 fn stage_reference(
     store: &Store,
@@ -676,6 +711,7 @@ fn accept_reference(
 pub fn run(paths: &DataPaths, command: ExclusiveTurnCommand) -> Result<()> {
     use ExclusiveTurnCommand::*;
     match command {
+        Writer { command } => writer::run(paths, command),
         Network { command } => network::run(paths, command),
         Draft { device_keys, initial_holder, compatibility, state } => {
             ensure!(device_keys.len() == 2, "exactly two device keys required");
@@ -771,21 +807,8 @@ pub fn run(paths: &DataPaths, command: ExclusiveTurnCommand) -> Result<()> {
         Checkpoint { review, expected_checkpoint, state } => {
             review.confirm()?;
             let (store, mut journal, head) = opened(paths, &review.pin)?;
-            ensure!(journal.phase == Phase::Held, "reference turn is not held");
-            ensure!(
-                journal.checkpoint.reference_commitment == expected_checkpoint,
-                "local checkpoint differs from expected pin"
-            );
             let (checkpoint, bytes) = state.read()?;
-            ensure!(
-                checkpoint.reference_commitment != expected_checkpoint || checkpoint == journal.checkpoint,
-                "same opaque bytes cannot substitute checkpoint digest claims"
-            );
-            if checkpoint != journal.checkpoint {
-                store.retain(checkpoint, &bytes)?;
-                journal.checkpoint = checkpoint;
-                store.save(head.world(), &journal, true)?;
-            }
+            replace_checkpoint(&store, &mut journal, &head, expected_checkpoint, checkpoint, &bytes)?;
             print_document(&report(&head, Some(&journal)))
         }
         Prepare { review, expected_checkpoint } => {
