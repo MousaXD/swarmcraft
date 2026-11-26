@@ -23,6 +23,8 @@ use swarm_protocol::{
     MAX_OWNERLESS_HISTORY_BYTES, MAX_OWNERLESS_VALIDATORS,
 };
 
+#[path = "ownerless_observation.rs"]
+mod observation;
 #[path = "ownerless_participation.rs"]
 mod participation;
 
@@ -32,6 +34,11 @@ const STORE: &str = "ownerless-authority-lab-v1";
 
 #[derive(Debug, Subcommand)]
 pub enum AuthorityCommand {
+    /// Bounded signed TCP reference head observations; never a lease or permit.
+    Observe {
+        #[command(subcommand)]
+        command: observation::ObservationCommand,
+    },
     /// Separate reference player/worker eligibility and single-use identity proofs.
     Participation {
         #[command(subcommand)]
@@ -425,13 +432,25 @@ impl Store {
     }
 
     fn open(paths: &DataPaths, world: OwnerlessWorldIdV1) -> Result<Self> {
+        Self::open_with_lock(paths, world, false)
+    }
+
+    fn try_open(paths: &DataPaths, world: OwnerlessWorldIdV1) -> Result<Self> {
+        Self::open_with_lock(paths, world, true)
+    }
+
+    fn open_with_lock(paths: &DataPaths, world: OwnerlessWorldIdV1, nonblocking: bool) -> Result<Self> {
         let identity = identity(paths)?;
         let dir = world_dir(paths, world)?;
         check_dir(&paths.root.join(STORE))?;
         check_dir(&dir)?;
         check_dir(&dir.join("checkpoints"))?;
         let lock = private_file(&dir.join("journal.lock"))?;
-        FileExt::lock_exclusive(&lock)?;
+        if nonblocking {
+            FileExt::try_lock_exclusive(&lock).context("ownerless journal busy; observation refused")?;
+        } else {
+            FileExt::lock_exclusive(&lock)?;
+        }
         Ok(Self { dir, _lock: lock, identity })
     }
 
@@ -517,6 +536,7 @@ impl Store {
 pub fn run(paths: &DataPaths, command: AuthorityCommand) -> Result<()> {
     use AuthorityCommand::*;
     match command {
+        Observe { command } => observation::run(paths, command),
         Participation { command } => participation::run(paths, command),
         StateHash { checkpoint: file } => {
             let bytes = bounded_file(open_regular(&file)?, MAX_OWNERLESS_CHECKPOINT_BYTES)?;

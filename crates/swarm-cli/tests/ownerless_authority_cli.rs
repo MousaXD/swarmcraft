@@ -837,3 +837,355 @@ fn participation_challenge_is_single_use_across_processes_and_output_failure() {
     rejected(f.verify_role(1, head, &tampered, &reply), "local participation challenge signature invalid");
     f.assert_no_live_storage();
 }
+
+struct ObservationListener {
+    child: Option<std::process::Child>,
+    address: String,
+}
+
+impl ObservationListener {
+    fn finish(mut self) -> Output {
+        self.child.take().unwrap().wait_with_output().unwrap()
+    }
+}
+impl Drop for ObservationListener {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+impl Fixture {
+    fn observation_serve(&self, peer: usize, head: &str) -> Command {
+        cmd(
+            &self.profiles[peer],
+            &[
+                "observe",
+                "serve",
+                "--expected-world",
+                &self.world,
+                "--expected-head",
+                head,
+                "--bind",
+                "127.0.0.1:0",
+                "--confirm",
+            ],
+        )
+    }
+
+    fn observe_listener(&self, peer: usize, head: &str) -> ObservationListener {
+        use std::io::BufRead;
+        let child = self.observation_serve(peer, head).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+        let mut listener = ObservationListener { child: Some(child), address: String::new() };
+        let mut line = String::new();
+        std::io::BufReader::new(listener.child.as_mut().unwrap().stdout.as_mut().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        assert!(
+            !line.is_empty(),
+            "listener failed before readiness: {:?}",
+            listener.child.as_mut().unwrap().try_wait()
+        );
+        let ready: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(ready["classification"], "ownerless_reference_observation_listener");
+        assert_eq!(ready["validator"], self.identities[peer].peer_id().to_string());
+        assert_eq!(ready["head"], head);
+        assert_eq!(ready["runtime_activation"], false);
+        listener.address = ready["address"].as_str().unwrap().to_owned();
+        listener
+    }
+
+    fn observation_collect(&self, verifier: usize, head: &str, peers: &[(usize, &str)]) -> Output {
+        let endpoints: Vec<_> = peers.iter().map(|(i, a)| format!("{}@{}", self.identities[*i].peer_id(), a)).collect();
+        let mut args =
+            vec!["observe", "collect", "--expected-world", &self.world, "--expected-head", head, "--confirm"];
+        for endpoint in &endpoints {
+            args.extend(["--peer", endpoint]);
+        }
+        invoke(&self.profiles[verifier], &args)
+    }
+
+    fn verify_observation_report(&self, history: &Path, result: &Value) {
+        use swarm_consensus::{
+            ownerless_authority::verify_ownerless_history, ownerless_observation::verify_observation_majority,
+        };
+        let history: swarm_protocol::OwnerlessAuthorityHistoryV1 =
+            serde_json::from_slice(&fs::read(history).unwrap()).unwrap();
+        let head = verify_ownerless_history(self.world.parse().unwrap(), &history).unwrap();
+        let request = serde_json::from_value(result["request"].clone()).unwrap();
+        let responses: Vec<swarm_protocol::OwnerlessObservationResponseV1> =
+            serde_json::from_value(result["responses"].clone()).unwrap();
+        verify_observation_majority(&head, &request, &responses).unwrap();
+        assert_eq!(result["classification"], "observed_recent_ownerless_reference_majority");
+        assert_eq!(result["observation_count"], responses.len());
+        assert_eq!(result["head"], head.hash().to_string());
+        assert_eq!(result["checkpoint"], head.checkpoint().to_string());
+        assert_eq!(result["reference_fence"], head.fence());
+        assert_eq!(result["majority_threshold"], head.threshold());
+        assert!(result["collection_elapsed_ms"].as_u64().unwrap() < result["collection_window_ms"].as_u64().unwrap());
+        for key in [
+            "freshness_lease",
+            "latest_global_head_proven",
+            "live_quorum_verified",
+            "write_authority",
+            "canonical_authority",
+            "runtime_activation",
+            "player_admission",
+            "worker_admission",
+        ] {
+            assert_eq!(result[key], false, "observation granted {key}");
+        }
+    }
+}
+
+#[test]
+fn actual_tcp_observation_survives_founder_absence_and_rejects_replay() {
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+    };
+    let f = Fixture::new();
+    let founder = fs::read(f.journal(0)).unwrap();
+    let before = [fs::read(f.journal(1)).unwrap(), fs::read(f.journal(2)).unwrap()];
+    let remote = f.observe_listener(2, &f.initial_head);
+    let first = json(f.observation_collect(1, &f.initial_head, &[(2, &remote.address)]));
+    success(remote.finish());
+    f.verify_observation_report(&f.genesis, &first);
+    assert_eq!(first["observation_count"], 2);
+    assert_eq!(first["unavailable_or_invalid_peers"], serde_json::json!([]));
+    let remote = f.observe_listener(2, &f.initial_head);
+    let second = json(f.observation_collect(1, &f.initial_head, &[(2, &remote.address)]));
+    success(remote.finish());
+    f.verify_observation_report(&f.genesis, &second);
+    assert_ne!(first["request"]["context"]["nonce"], second["request"]["context"]["nonce"]);
+    assert_ne!(first["responses"], second["responses"]);
+
+    // A real TCP endpoint replays a valid prior signed remote response, not
+    // a syntactically invalid or unsigned substitute.
+    let cached = first["responses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| {
+            serde_json::from_value::<swarm_protocol::PeerId>(r["validator"].clone()).unwrap()
+                == f.identities[2].peer_id()
+        })
+        .unwrap()
+        .clone();
+    let fake = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = fake.local_addr().unwrap().to_string();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = fake.accept().unwrap();
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        let mut size = [0; 4];
+        stream.read_exact(&mut size).unwrap();
+        let mut bytes = vec![0; u32::from_be_bytes(size) as usize];
+        assert!(bytes.len() <= 8192);
+        stream.read_exact(&mut bytes).unwrap();
+        let fresh: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_ne!(fresh["context"]["nonce"], Value::Null);
+        let bytes = serde_json::to_vec(&cached).unwrap();
+        stream.write_all(&(bytes.len() as u32).to_be_bytes()).unwrap();
+        stream.write_all(&bytes).unwrap();
+    });
+    rejected(f.observation_collect(1, &f.initial_head, &[(2, &addr)]), "missing observation majority");
+    server.join().unwrap();
+
+    // A genuinely signed response from the wrong targeted validator is
+    // refused even though the signer is a member of the same roster.
+    let wrong = f.observe_listener(2, &f.initial_head);
+    rejected(f.observation_collect(1, &f.initial_head, &[(0, &wrong.address)]), "missing observation majority");
+    success(wrong.finish());
+    assert_eq!(fs::read(f.journal(0)).unwrap(), founder);
+    assert_eq!(fs::read(f.journal(1)).unwrap(), before[0]);
+    assert_eq!(fs::read(f.journal(2)).unwrap(), before[1]);
+    f.assert_no_live_storage();
+}
+
+#[test]
+fn actual_tcp_observation_rechecks_pending_and_retired_heads_after_listen() {
+    let f = Fixture::new();
+    let remote = f.observe_listener(2, &f.initial_head);
+    let recovery = f.propose(&f.genesis, &f.initial_head, "obs-recovery.json", &["--recover"]);
+    let vote2 = f.vote(2, &f.initial_head, &recovery, &f.initial, "obs-vote2.json");
+    rejected(f.observation_collect(1, &f.initial_head, &[(2, &remote.address)]), "missing observation majority");
+    rejected(remote.finish(), "pending governance vote prevents observation");
+    rejected(f.observation_serve(2, &f.initial_head).output().unwrap(), "pending governance vote prevents observation");
+    let vote1 = f.vote(1, &f.initial_head, &recovery, &f.initial, "obs-vote1.json");
+    let history = f.certified(&f.genesis, &f.initial_head, &recovery, &[&vote1, &vote2], "obs-h1.json");
+    f.sync(&[1, 2], &history, &recovery.1, &f.initial, 1, 2);
+    let remote = f.observe_listener(2, &recovery.1);
+    let result = json(f.observation_collect(1, &recovery.1, &[(2, &remote.address)]));
+    success(remote.finish());
+    f.verify_observation_report(&history, &result);
+
+    // Listener opened on an accepted head, then another majority decision
+    // arrives before its first request. The old listener cannot sign.
+    let remote = f.observe_listener(2, &recovery.1);
+    let next = f.propose(&history, &recovery.1, "obs-next.json", &["--recover"]);
+    let vote1 = f.vote(1, &recovery.1, &next, &f.initial, "obs-next-vote1.json");
+    let vote2 = f.vote(2, &recovery.1, &next, &f.initial, "obs-next-vote2.json");
+    let h2 = f.certified(&history, &recovery.1, &next, &[&vote1, &vote2], "obs-h2.json");
+    f.sync(&[2], &h2, &next.1, &f.initial, 2, 3);
+    // Founder has the prior certified head but no pending vote.
+    f.sync(&[0], &history, &recovery.1, &f.initial, 1, 2);
+    rejected(f.observation_collect(0, &recovery.1, &[(2, &remote.address)]), "missing observation majority");
+    rejected(remote.finish(), "differs from expected pin");
+    rejected(
+        f.observation_collect(1, &recovery.1, &[(2, "127.0.0.1:1")]),
+        "pending governance vote prevents observation",
+    );
+    f.sync(&[1], &h2, &next.1, &f.initial, 2, 3);
+    let remote = f.observe_listener(2, &next.1);
+    let result = json(f.observation_collect(1, &next.1, &[(2, &remote.address)]));
+    success(remote.finish());
+    f.verify_observation_report(&h2, &result);
+    f.assert_no_live_storage();
+}
+
+#[test]
+fn actual_tcp_observation_bounds_endpoints_frames_and_stalled_peer() {
+    use std::{
+        io::{Read, Write},
+        net::{TcpListener, TcpStream},
+        time::{Duration, Instant},
+    };
+    let f = Fixture::new();
+    rejected(f.observation_collect(1, &f.initial_head, &[(3, "127.0.0.1:1")]), "not a current remote validator");
+    rejected(f.observation_collect(1, &f.initial_head, &[(1, "127.0.0.1:1")]), "not a current remote validator");
+    rejected(f.observation_collect(1, &f.initial_head, &[(2, "8.8.8.8:1")]), "explicit and private");
+    rejected(
+        f.observation_collect(1, &f.initial_head, &[(2, "127.0.0.1:1"), (2, "127.0.0.1:2")]),
+        "duplicate observation validator",
+    );
+    rejected(
+        f.observation_collect(1, &f.initial_head, &[(0, "127.0.0.1:1"), (2, "127.0.0.1:1")]),
+        "duplicate observation validator",
+    );
+    rejected(f.observation_serve(3, &f.initial_head).output().unwrap(), "not a current ownerless validator");
+    rejected(
+        invoke(
+            &f.profiles[2],
+            &[
+                "observe",
+                "serve",
+                "--expected-world",
+                &f.world,
+                "--expected-head",
+                &f.initial_head,
+                "--bind",
+                "0.0.0.0:0",
+                "--confirm",
+            ],
+        ),
+        "explicit private or loopback",
+    );
+    rejected(
+        invoke(
+            &f.profiles[2],
+            &[
+                "observe",
+                "serve",
+                "--expected-world",
+                &f.world,
+                "--expected-head",
+                &f.initial_head,
+                "--bind",
+                "127.0.0.1:0",
+            ],
+        ),
+        "explicit --confirm",
+    );
+
+    let remote = f.observe_listener(2, &f.initial_head);
+    let mut client = TcpStream::connect(&remote.address).unwrap();
+    client.write_all(&8193u32.to_be_bytes()).unwrap();
+    drop(client);
+    rejected(remote.finish(), "invalid observation frame size");
+
+    // A silent but connected endpoint cannot block collection of the
+    // other valid remote voter. The network phase leaves time for final
+    // local journal and signature verification inside the shared window.
+    let remote = f.observe_listener(2, &f.initial_head);
+    let silent = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = silent.local_addr().unwrap().to_string();
+    let stall = std::thread::spawn(move || {
+        let (mut stream, _) = silent.accept().unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(6))).unwrap();
+        let mut size = [0; 4];
+        stream.read_exact(&mut size).unwrap();
+        let mut bytes = vec![0; u32::from_be_bytes(size) as usize];
+        assert!(bytes.len() <= 8192);
+        stream.read_exact(&mut bytes).unwrap();
+        // Wait for the collector to close at its monotonic deadline.
+        assert_eq!(stream.read(&mut size).unwrap(), 0);
+    });
+    let start = Instant::now();
+    let report = json(f.observation_collect(1, &f.initial_head, &[(0, &addr), (2, &remote.address)]));
+    success(remote.finish());
+    stall.join().unwrap();
+    assert!(start.elapsed() < Duration::from_secs(7));
+    f.verify_observation_report(&f.genesis, &report);
+    assert_eq!(report["observation_count"], 2);
+    assert_eq!(report["unavailable_or_invalid_peers"], serde_json::json!([f.identities[0].peer_id().to_string()]));
+    f.assert_no_live_storage();
+}
+
+#[test]
+fn retained_network_observation_signatures_match_recovered_checkpoint() {
+    use swarm_consensus::{
+        ownerless_authority::verify_ownerless_history, ownerless_observation::verify_observation_majority,
+    };
+    use swarm_protocol::{OwnerlessObservationRequestV1, OwnerlessObservationResponseV1};
+    let evidence: Value = serde_json::from_str(include_str!(
+        "../../../research/distributed-simulation/evidence/2026-11-26-ownerless-network-observation.json"
+    ))
+    .unwrap();
+    let history = serde_json::from_value(evidence["history"].clone()).unwrap();
+    let world = evidence["world_id"].as_str().unwrap().parse().unwrap();
+    let head = verify_ownerless_history(world, &history).unwrap();
+    let checkpoint = serde_json::to_vec(&evidence["accepted_checkpoint"]).unwrap();
+    assert_eq!(ownerless_checkpoint_commitment(&checkpoint).unwrap(), head.checkpoint());
+    assert_eq!(evidence["physical_machines"], 1);
+    assert_eq!(evidence["founder_journal_unchanged"], true);
+    assert_eq!(evidence["validator_journals_unchanged"], true);
+    assert_eq!(evidence["all_listeners_exited"], true);
+    assert_eq!(evidence["external_routes"], false);
+    assert_eq!(evidence["partition"]["link_down"], true);
+    assert_eq!(evidence["partition"]["refusal"], "missing observation majority");
+    assert_eq!(head.sequence(), 1);
+    assert_eq!(head.fence(), 2);
+    let mut observed = Vec::new();
+    for stage in ["first", "restored"] {
+        let sample = &evidence[stage];
+        assert_ne!(sample["collector_namespace"], sample["listener_namespace"]);
+        assert_eq!(sample["listener_exitcode"], 0);
+        let report = &sample["observation"];
+        assert_eq!(report["head"], head.hash().to_string());
+        assert_eq!(report["checkpoint"], head.checkpoint().to_string());
+        assert_eq!(report["observation_count"], 2);
+        assert_eq!(report["classification"], "observed_recent_ownerless_reference_majority");
+        for flag in [
+            "freshness_lease",
+            "latest_global_head_proven",
+            "live_quorum_verified",
+            "write_authority",
+            "canonical_authority",
+            "runtime_activation",
+            "player_admission",
+            "worker_admission",
+        ] {
+            assert_eq!(report[flag], false);
+        }
+        let request: OwnerlessObservationRequestV1 = serde_json::from_value(report["request"].clone()).unwrap();
+        let responses: Vec<OwnerlessObservationResponseV1> =
+            serde_json::from_value(report["responses"].clone()).unwrap();
+        verify_observation_majority(&head, &request, &responses).unwrap();
+        observed.push((request, responses));
+    }
+    assert_ne!(observed[0].0.context.nonce, observed[1].0.context.nonce);
+    assert!(verify_observation_majority(&head, &observed[1].0, &observed[0].1).is_err());
+    // Timing and kernel namespace facts are retained local observations,
+    // not cryptographic proof of a current live majority.
+}

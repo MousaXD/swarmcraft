@@ -198,3 +198,103 @@ fn bounded_rosters_and_checkpoint_documents_fail_closed() {
     oversized.records = vec![certify(&p, &k[..2]); MAX_OWNERLESS_HISTORY_RECORDS + 1];
     assert!(verify_ownerless_history(base.world(), &oversized).is_err());
 }
+
+#[test]
+fn ownerless_observation_threshold_and_nonce_are_not_governance_votes() {
+    use swarm_consensus::ownerless_observation::*;
+    let k = keys(4);
+    let h = history(&k[..3]);
+    let initial = head(&h);
+    let verifier = validator(&k[1]).peer_id;
+    let context = observation_context(&initial, verifier, [43; 32]).unwrap();
+    let sign = |context: OwnerlessObservationV1, key: &SigningKey| OwnerlessObservationRequestV1 {
+        signature: key.sign(&context.request_bytes().unwrap()).to_bytes().to_vec(),
+        context,
+    };
+    let request = sign(context.clone(), &k[1]);
+    let respond = |request: &OwnerlessObservationRequestV1, key: &SigningKey| {
+        let validator = validator(key).peer_id;
+        OwnerlessObservationResponseV1 {
+            context_hash: request.context.context_hash().unwrap(),
+            validator,
+            signature: key.sign(&request.context.response_bytes(validator).unwrap()).to_bytes().to_vec(),
+        }
+    };
+    let local = respond(&request, &k[1]);
+    let remote = respond(&request, &k[2]);
+    assert!(verify_observation_request(&initial, &request).is_ok());
+    assert!(verify_observation_majority(&initial, &request, &[local.clone(), remote.clone()]).is_ok());
+    assert!(verify_observation_majority(&initial, &request, std::slice::from_ref(&local)).is_err());
+    assert!(verify_observation_majority(&initial, &request, &[local.clone(), local.clone()]).is_err());
+    assert!(verify_observation_majority(&initial, &request, &[remote.clone(), respond(&request, &k[0])]).is_err());
+    assert!(verify_observation_majority(&initial, &request, &[local.clone(), respond(&request, &k[3])]).is_err());
+    assert!(verify_observation_response(&initial, &request, validator(&k[0]).peer_id, &remote).is_err());
+
+    let fresh = sign(observation_context(&initial, verifier, [44; 32]).unwrap(), &k[1]);
+    assert!(verify_observation_response(&initial, &fresh, remote.validator, &remote).is_err());
+    assert!(observation_context(&initial, verifier, [0; 32]).is_err());
+    assert!(observation_context(&initial, validator(&k[3]).peer_id, [43; 32]).is_err());
+    let mut altered = context.clone();
+    altered.world = format!("scownerless:{}", Hash32([1; 32])).parse().unwrap();
+    let mut wrong = vec![altered];
+    let mut altered = context.clone();
+    altered.head = Hash32([1; 32]);
+    wrong.push(altered);
+    let mut altered = context.clone();
+    altered.sequence += 1;
+    wrong.push(altered);
+    let mut altered = context.clone();
+    altered.fence += 1;
+    wrong.push(altered);
+    let mut altered = context.clone();
+    altered.checkpoint = Hash32([1; 32]);
+    wrong.push(altered);
+    let mut altered = context.clone();
+    altered.policy = Hash32([1; 32]);
+    wrong.push(altered);
+    let mut altered = context.clone();
+    altered.compatibility = Hash32([1; 32]);
+    wrong.push(altered);
+    for altered in wrong {
+        assert!(verify_observation_request(&initial, &sign(altered, &k[1])).is_err());
+    }
+    assert!(verify_observation_request(&initial, &sign(context, &k[2])).is_err());
+    let mut forged = remote.clone();
+    forged.signature = request.signature.clone();
+    assert!(verify_observation_response(&initial, &request, remote.validator, &forged).is_err());
+
+    let proposal = initial.draft(OwnerlessAuthorityActionV1::Recover).unwrap();
+    let next = apply_ownerless_certificate(&initial, &certify(&proposal, &k[1..3])).unwrap();
+    assert!(verify_observation_majority(&next, &request, &[local.clone(), remote.clone()]).is_err());
+    let governance = OwnerlessAuthorityVoteV1 {
+        proposal_hash: proposal.proposal_hash().unwrap(),
+        validator: remote.validator,
+        signature: remote.signature,
+    };
+    assert!(verify_ownerless_vote(&initial, &proposal, &governance).is_err());
+}
+
+#[test]
+fn ownerless_observation_removed_member_cannot_attest_under_new_roster() {
+    use swarm_consensus::ownerless_observation::*;
+    let k = keys(4);
+    let h = history(&k[..3]);
+    let initial = head(&h);
+    let next_roster = roster(&k[1..4]);
+    let proposal = initial.draft(OwnerlessAuthorityActionV1::Reconfigure { validators: next_roster }).unwrap();
+    let next = apply_ownerless_certificate(&initial, &certify(&proposal, &k[1..4])).unwrap();
+    let removed = validator(&k[0]).peer_id;
+    assert!(observation_context(&next, removed, [2; 32]).is_err());
+    let verifier = validator(&k[1]).peer_id;
+    let context = observation_context(&next, verifier, [2; 32]).unwrap();
+    let request = OwnerlessObservationRequestV1 {
+        signature: k[1].sign(&context.request_bytes().unwrap()).to_bytes().to_vec(),
+        context,
+    };
+    let response = OwnerlessObservationResponseV1 {
+        context_hash: request.context.context_hash().unwrap(),
+        validator: removed,
+        signature: k[0].sign(&request.context.response_bytes(removed).unwrap()).to_bytes().to_vec(),
+    };
+    assert!(verify_observation_response(&next, &request, removed, &response).is_err());
+}

@@ -71,9 +71,10 @@ checkpoint bytes are durable first.
 The old/current majority intersection makes conflicting certificates
 impossible under the **honest durable one-vote-per-parent** CFT assumption.
 Joint approval transfers that property to the next roster. A live quorum
-is not inferred from a historical certificate. The protocol intentionally
+is not inferred from a historical certificate. The governance protocol intentionally
 has no leader election, vote timeout, automatic view change, lease or live
-network transport. Different locked minority proposals can stall permanently;
+decision transport. The separate [network observation follow-up](ownerless-network-observation.md)
+provides nonce-bound private TCP head observations, not live authority. Different locked minority proposals can stall permanently;
 the design fails closed rather than resetting votes to manufacture progress.
 
 A minority cannot certify another head or recovery fence. It can export
