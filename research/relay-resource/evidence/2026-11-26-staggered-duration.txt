@@ -1,0 +1,18 @@
+Sabathon #17: staggered active encrypted relay circuit duration and isolation
+Baseline 40266e0; local TCP/Noise relay, four authenticated transport/application identities, two independent pairs.
+20 s circuit duration, 64 MiB circuit byte cap. Bulk 8 KiB/25ms and interactive 64 B/100ms paced exact echo. No world-authority or gameplay proof.
+test private_relay_expires_staggered_active_circuits_without_cross_disconnect ... relay_duration bulk acknowledged_bytes=5570560 samples=680 overlap_samples=472 dial_to_close_ms=20086 authenticated_to_close_ms=19888 payload_kib_per_s=273.53 p95_echo_ms=3.916
+relay_duration interactive acknowledged_bytes=12288 samples=192 overlap_samples=132 dial_to_close_ms=20092 authenticated_to_close_ms=19901 payload_kib_per_s=0.60 p95_echo_ms=3.886
+relay_duration configured_seconds=20 byte_budget=67108864 overlap_ms=13616 independent_post_expiry_samples=60 authentication_revoked_both_pairs=true
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 26.63s
+
+Source digest:
+88770ce3f840084e6d2dc435df737ad49e35ad149837b07dfec3cb5f66ad865f  crates/swarm-network/tests/game_stream_relay.rs
+
+Strict all-target/all-feature Clippy:
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 37.63s
+
+Existing relay regressions:
+test encrypted_game_substream_survives_a_real_local_libp2p_relay_circuit ... capacity transport=relay-tcp-noise acknowledged_bytes=1048576 elapsed_ms=346.821
+test private_relay_caps_bulk_circuit_without_disconnect_of_independent_pair ... capacity relay_circuits=2 configured_circuit_bytes=262144 bulk_acknowledged_bytes=126976
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 15.53s

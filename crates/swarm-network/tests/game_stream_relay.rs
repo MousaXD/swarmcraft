@@ -28,6 +28,14 @@ async fn start_relay_with_budget(
     allowed: &[TransportPeerId],
     max_circuit_bytes: u64,
 ) -> (TransportPeerId, Multiaddr, JoinHandle<()>) {
+    start_relay_with_limits(allowed, max_circuit_bytes, 300).await
+}
+
+async fn start_relay_with_limits(
+    allowed: &[TransportPeerId],
+    max_circuit_bytes: u64,
+    max_circuit_seconds: u64,
+) -> (TransportPeerId, Multiaddr, JoinHandle<()>) {
     let key = generate_transport_key();
     let peer = key.public().to_peer_id();
     let relay = PrivateRelay::bind(
@@ -37,7 +45,7 @@ async fn start_relay_with_budget(
             advertise: None,
             allowed_transport_peers: allowed.iter().map(ToString::to_string).collect(),
             max_circuit_bytes,
-            max_circuit_seconds: 300,
+            max_circuit_seconds,
             max_circuits: 4,
         },
     )
@@ -329,7 +337,7 @@ async fn connect_isolated_relay_pair(
     player: &mut SwarmNode,
     relay: TransportPeerId,
     address: Multiaddr,
-) {
+) -> Instant {
     let host_id = host.local_transport_peer_id();
     let player_id = player.local_transport_peer_id();
     host.configure_relay(relay, address.clone()).unwrap();
@@ -344,6 +352,7 @@ async fn connect_isolated_relay_pair(
     })
     .await
     .expect("independent host relay reservation");
+    let dialed = Instant::now();
     player.dial_via_relay(relay, address, host_id).unwrap();
     timeout(Duration::from_secs(15), async {
         while host.application_peer(&player_id).is_none() || player.application_peer(&host_id).is_none() {
@@ -360,6 +369,7 @@ async fn connect_isolated_relay_pair(
         assert!(!node.connectivity_diagnostics().direct_connectivity);
         assert_eq!(node.application_peer(&relay), None);
     }
+    dialed
 }
 
 #[tokio::test]
@@ -483,4 +493,161 @@ async fn private_relay_caps_bulk_circuit_without_disconnect_of_independent_pair(
     })
     .await
     .expect("bounded relay resource acceptance");
+}
+
+struct TimedCircuit {
+    dialed: Instant,
+    authenticated: Instant,
+    closed: Instant,
+    chunk_bytes: usize,
+    samples: Vec<(Instant, Duration)>,
+}
+
+impl TimedCircuit {
+    fn report(&self, label: &str, overlap_start: Instant, overlap_end: Instant) {
+        let mut latency: Vec<_> = self.samples.iter().map(|(_, rtt)| *rtt).collect();
+        latency.sort_unstable();
+        let p95 = latency[(latency.len() * 95).div_ceil(100) - 1];
+        let bytes = self.samples.len() * self.chunk_bytes;
+        let overlap = self.samples.iter().filter(|(at, _)| *at >= overlap_start && *at < overlap_end).count();
+        println!(
+            "relay_duration {label} acknowledged_bytes={bytes} samples={} overlap_samples={overlap} dial_to_close_ms={} authenticated_to_close_ms={} payload_kib_per_s={:.2} p95_echo_ms={:.3}",
+            self.samples.len(), self.closed.duration_since(self.dialed).as_millis(),
+            self.closed.duration_since(self.authenticated).as_millis(),
+            bytes as f64 / 1024.0 / self.closed.duration_since(self.authenticated).as_secs_f64(),
+            p95.as_secs_f64() * 1000.0,
+        );
+    }
+}
+
+/// A real encrypted relay circuit under sustained, bounded application load.
+/// No Minecraft login, signed world admission or WAN fairness is inferred.
+async fn paced_circuit_until_expiry(
+    host: SwarmNode,
+    player: SwarmNode,
+    dialed: Instant,
+    chunk_bytes: usize,
+    interval: Duration,
+    byte_budget: u64,
+) -> TimedCircuit {
+    let authenticated = Instant::now();
+    let host_id = host.local_transport_peer_id();
+    let player_id = player.local_transport_peer_id();
+    let player_app = host.application_peer(&player_id).unwrap();
+    let host_app = player.application_peer(&host_id).unwrap();
+    let host_registry = host.game_authenticated_peers();
+    let player_registry = player.game_authenticated_peers();
+    let mut host_control = host.game_stream_control();
+    let mut player_control = player.game_stream_control();
+    let mut incoming = host_control.accept(StreamProtocol::new(GAME_STREAM_PROTOCOL)).unwrap();
+    let (host_stop, host_rx) = oneshot::channel();
+    let (player_stop, player_rx) = oneshot::channel();
+    let host_driver = tokio::spawn(pump(host, host_rx));
+    let player_driver = tokio::spawn(pump(player, player_rx));
+    let (samples, closed) = timeout(Duration::from_secs(35), async {
+        let echo = async {
+            let (peer, mut stream) = incoming.next().await.expect("incoming paced circuit");
+            assert_eq!(peer, player_id);
+            assert_eq!(host_registry.read().unwrap().get(&peer), Some(&player_app));
+            let mut data = vec![0; chunk_bytes];
+            while stream.read_exact(&mut data).await.is_ok() {
+                if stream.write_all(&data).await.is_err() || stream.flush().await.is_err() {
+                    break;
+                }
+            }
+        };
+        let send = async {
+            let mut stream =
+                player_control.open_stream(host_id, StreamProtocol::new(GAME_STREAM_PROTOCOL)).await.unwrap();
+            assert_eq!(player_registry.read().unwrap().get(&host_id), Some(&host_app));
+            let mut samples = Vec::new();
+            let mut data = vec![0x61; chunk_bytes];
+            let mut response = vec![0; chunk_bytes];
+            loop {
+                // Independent, sequence-tagged exact echo. Keep the
+                // bidirectional payload well below the encrypted byte cap;
+                // expiration must not be confused with volume exhaustion.
+                let sequence = samples.len() as u64;
+                data[..8].copy_from_slice(&sequence.to_le_bytes());
+                let started = Instant::now();
+                let exchange = timeout(Duration::from_secs(5), async {
+                    stream.write_all(&data).await?;
+                    stream.flush().await?;
+                    stream.read_exact(&mut response).await
+                })
+                .await
+                .expect("paced relay exchange stalled without a transport close");
+                if exchange.is_err() {
+                    break (samples, Instant::now());
+                }
+                assert_eq!(data, response);
+                samples.push((Instant::now(), started.elapsed()));
+                assert!(
+                    samples.len() * chunk_bytes * 2 < byte_budget as usize / 2,
+                    "byte cap would confound duration test"
+                );
+                tokio::time::sleep(interval).await;
+            }
+        };
+        let (measured, ()) = tokio::join!(send, echo);
+        measured
+    })
+    .await
+    .expect("duration cap must close both ends of the still-active stream");
+    timeout(Duration::from_secs(8), async {
+        while host_registry.read().unwrap().contains_key(&player_id)
+            || player_registry.read().unwrap().contains_key(&host_id)
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("expired circuit must retire application authentication at both endpoints");
+    let _ = host_stop.send(());
+    let _ = player_stop.send(());
+    let host = host_driver.await.unwrap();
+    let player = player_driver.await.unwrap();
+    assert!(host.application_peer(&player_id).is_none() && player.application_peer(&host_id).is_none());
+    assert!(samples.len() >= 10, "circuit expired before sustained traffic");
+    TimedCircuit { dialed, authenticated, closed, chunk_bytes, samples }
+}
+
+#[tokio::test]
+async fn private_relay_expires_staggered_active_circuits_without_cross_disconnect() {
+    timeout(Duration::from_secs(85), async {
+        const SECONDS: u64 = 20;
+        const BYTES: u64 = 64 * 1024 * 1024;
+        let make = |nonce| {
+            let key = SigningKey::generate(&mut OsRng);
+            SwarmNode::new(generate_transport_key(), hello(&key, nonce), key).unwrap()
+        };
+        let (mut bulk_host, mut bulk_player, mut interactive_host, mut interactive_player) = (make(1), make(2), make(3), make(4));
+        let allowed = [&bulk_host, &bulk_player, &interactive_host, &interactive_player]
+            .map(SwarmNode::local_transport_peer_id);
+        let (relay, address, relay_task) = start_relay_with_limits(&allowed, BYTES, SECONDS).await;
+        let bulk_dial = connect_isolated_relay_pair(&mut bulk_host, &mut bulk_player, relay, address.clone()).await;
+        let bulk = tokio::spawn(paced_circuit_until_expiry(bulk_host, bulk_player, bulk_dial, 8192, Duration::from_millis(25), BYTES));
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        let interactive_dial = connect_isolated_relay_pair(&mut interactive_host, &mut interactive_player, relay, address).await;
+        let interactive = tokio::spawn(paced_circuit_until_expiry(interactive_host, interactive_player, interactive_dial, 64, Duration::from_millis(100), BYTES));
+        let (bulk, interactive) = tokio::join!(bulk, interactive);
+        let (bulk, interactive) = (bulk.unwrap(), interactive.unwrap());
+        for sample in [&bulk, &interactive] {
+            // Dial starts before relay circuit establishment. Authentication
+            // finishes after it. These bracket the actual timer origin.
+            assert!(sample.closed.duration_since(sample.dialed) >= Duration::from_secs(SECONDS - 1), "premature circuit close");
+            assert!(sample.closed.duration_since(sample.authenticated) <= Duration::from_secs(SECONDS + 5), "duration cap did not bound lifetime");
+            assert!(sample.closed.duration_since(sample.samples.last().unwrap().0) <= Duration::from_secs(5), "stream was not active before close");
+        }
+        let overlap_start = interactive.samples.first().unwrap().0;
+        let overlap_end = bulk.closed;
+        assert!(overlap_end > overlap_start, "circuits never overlapped");
+        assert!(bulk.samples.iter().filter(|(at, _)| *at >= overlap_start).count() >= 10, "bulk circuit did not progress during overlap");
+        assert!(interactive.samples.iter().filter(|(at, _)| *at < overlap_end).count() >= 10, "interactive circuit did not progress during overlap");
+        assert!(interactive.samples.iter().filter(|(at, _)| *at > bulk.closed).count() >= 5, "first expiration interrupted the independent circuit");
+        bulk.report("bulk", overlap_start, overlap_end);
+        interactive.report("interactive", overlap_start, overlap_end);
+        println!("relay_duration configured_seconds={SECONDS} byte_budget={BYTES} overlap_ms={} independent_post_expiry_samples={} authentication_revoked_both_pairs=true", overlap_end.duration_since(overlap_start).as_millis(), interactive.samples.iter().filter(|(at, _)| *at > overlap_end).count());
+        relay_task.abort();
+    }).await.expect("bounded staggered relay duration gate");
 }

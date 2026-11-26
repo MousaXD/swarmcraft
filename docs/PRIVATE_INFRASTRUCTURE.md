@@ -238,6 +238,14 @@ to. A local four-peer regression sets a 256 KiB encrypted circuit budget,
 acknowledges 124 KiB of bulk payload (with matching echo), then verifies the
 bulk connection loses authentication while an independent small circuit
 continues to exchange bytes. Payload totals can vary with framing overhead.
+A second local regression staggers two independent authenticated circuits
+by six seconds with a 20-second duration and 64 MiB byte cap. It measures
+sequence-tagged payloads only after exact echo, verifies overlapping progress,
+and requires both endpoint authentication mappings to retire on circuit
+expiry. In the recorded run, the bulk circuit acknowledged 5,570,560 bytes
+and the interactive circuit 12,288 bytes; both expired near 20 seconds. The
+interactive stream completed 60 additional exchanges after the bulk stream
+closed. See [retained local evidence](../research/relay-resource/evidence/2026-11-26-staggered-duration.txt).
 Production multi-world fairness and measured bandwidth targets require
 separate evidence; do not promise a public unlimited community relay.
 A network administrator can observe traffic timing and transport metadata.
