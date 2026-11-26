@@ -1,0 +1,201 @@
+{
+  "classification": "local_shared_loopback_netem_relay",
+  "kernel": "7.2.15-76070215-generic",
+  "test_sha256": "d9f4446e336f276abf75bc5d8b3dfa02a4dba91f11e6bb1b438a33632f8ebdd2",
+  "profiles": [
+    {
+      "rate_mbit": 4,
+      "delay_ms": 5,
+      "passed": true,
+      "before": {
+        "kind": "netem",
+        "handle": "81bb:",
+        "root": true,
+        "refcnt": 2,
+        "options": {
+          "limit": 1000,
+          "delay": {
+            "delay": 0.005,
+            "jitter": 0,
+            "correlation": 0
+          },
+          "rate": {
+            "rate": 500000,
+            "packetoverhead": 0,
+            "cellsize": 0,
+            "celloverhead": 0
+          },
+          "ecn": false,
+          "gap": 0
+        },
+        "bytes": 0,
+        "packets": 0,
+        "drops": 0,
+        "overlimits": 0,
+        "requeues": 0,
+        "backlog": 0,
+        "qlen": 0
+      },
+      "elapsed_seconds": 27.034,
+      "after": {
+        "kind": "netem",
+        "handle": "81bb:",
+        "root": true,
+        "refcnt": 2,
+        "options": {
+          "limit": 1000,
+          "delay": {
+            "delay": 0.005,
+            "jitter": 0,
+            "correlation": 0
+          },
+          "rate": {
+            "rate": 500000,
+            "packetoverhead": 0,
+            "cellsize": 0,
+            "celloverhead": 0
+          },
+          "ecn": false,
+          "gap": 0
+        },
+        "bytes": 5988434,
+        "packets": 3829,
+        "drops": 0,
+        "overlimits": 0,
+        "requeues": 0,
+        "backlog": 0,
+        "qlen": 0
+      },
+      "exit_code": 0,
+      "receipt": {
+        "bulk": {
+          "acknowledged_bytes": 1384448,
+          "samples": 169,
+          "overlap_samples": 111,
+          "dial_to_close_ms": 20100,
+          "authenticated_to_close_ms": 19800,
+          "payload_kib_per_s": 68.28,
+          "p95_echo_ms": 93.566
+        },
+        "interactive": {
+          "acknowledged_bytes": 9024,
+          "samples": 141,
+          "overlap_samples": 89,
+          "dial_to_close_ms": 20226,
+          "authenticated_to_close_ms": 19684,
+          "payload_kib_per_s": 0.45,
+          "p95_echo_ms": 82.516
+        },
+        "summary": {
+          "configured_seconds": 20,
+          "byte_budget": 67108864,
+          "overlap_ms": 12978,
+          "independent_post_expiry_samples": 52,
+          "authentication_revoked_both_pairs": true
+        }
+      },
+      "observed_bytes": 5988434,
+      "observed_packets": 3829
+    },
+    {
+      "rate_mbit": 1,
+      "delay_ms": 15,
+      "passed": true,
+      "before": {
+        "kind": "netem",
+        "handle": "81bc:",
+        "root": true,
+        "refcnt": 2,
+        "options": {
+          "limit": 1000,
+          "delay": {
+            "delay": 0.015,
+            "jitter": 0,
+            "correlation": 0
+          },
+          "rate": {
+            "rate": 125000,
+            "packetoverhead": 0,
+            "cellsize": 0,
+            "celloverhead": 0
+          },
+          "ecn": false,
+          "gap": 0
+        },
+        "bytes": 0,
+        "packets": 0,
+        "drops": 0,
+        "overlimits": 0,
+        "requeues": 0,
+        "backlog": 0,
+        "qlen": 0
+      },
+      "elapsed_seconds": 28.37,
+      "after": {
+        "kind": "netem",
+        "handle": "81bc:",
+        "root": true,
+        "refcnt": 2,
+        "options": {
+          "limit": 1000,
+          "delay": {
+            "delay": 0.015,
+            "jitter": 0,
+            "correlation": 0
+          },
+          "rate": {
+            "rate": 125000,
+            "packetoverhead": 0,
+            "cellsize": 0,
+            "celloverhead": 0
+          },
+          "ecn": false,
+          "gap": 0
+        },
+        "bytes": 2031312,
+        "packets": 2164,
+        "drops": 0,
+        "overlimits": 0,
+        "requeues": 0,
+        "backlog": 0,
+        "qlen": 0
+      },
+      "exit_code": 0,
+      "receipt": {
+        "bulk": {
+          "acknowledged_bytes": 442368,
+          "samples": 54,
+          "overlap_samples": 30,
+          "dial_to_close_ms": 20275,
+          "authenticated_to_close_ms": 19518,
+          "payload_kib_per_s": 22.13,
+          "p95_echo_ms": 340.273
+        },
+        "interactive": {
+          "acknowledged_bytes": 4800,
+          "samples": 75,
+          "overlap_samples": 30,
+          "dial_to_close_ms": 20752,
+          "authenticated_to_close_ms": 18739,
+          "payload_kib_per_s": 0.25,
+          "p95_echo_ms": 261.116
+        },
+        "summary": {
+          "configured_seconds": 20,
+          "byte_budget": 67108864,
+          "overlap_ms": 10492,
+          "independent_post_expiry_samples": 45,
+          "authentication_revoked_both_pairs": true
+        }
+      },
+      "observed_bytes": 2031312,
+      "observed_packets": 2164
+    }
+  ],
+  "physical_network_verified": false,
+  "actual_minecraft_worlds_verified": false,
+  "bandwidth_fairness_guaranteed": false,
+  "source_baseline": "f9e6c8ccdb7c941ca6ce52d68452985fae840be8",
+  "harness": "scripts/acceptance/relay_resource.py",
+  "limitations": "Shared loopback qdisc affects both directions and all local control/game traffic. Profiles change both rate and delay. No causal attribution of throughput change to a single variable; no saturated physical uplink or per-world fairness guaranteed."
+}

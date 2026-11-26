@@ -246,6 +246,22 @@ expiry. In the recorded run, the bulk circuit acknowledged 5,570,560 bytes
 and the interactive circuit 12,288 bytes; both expired near 20 seconds. The
 interactive stream completed 60 additional exchanges after the bulk stream
 closed. See [retained local evidence](../research/relay-resource/evidence/2026-11-26-staggered-duration.txt).
+The [shared netem gate](../scripts/acceptance/relay_resource.py) additionally
+runs the same authenticated relay regression in a newly created mapped-user
+and loopback-only network namespace. It checks the actual kernel rate/delay
+configuration and packet/byte counters, rejects skipped or inconsistent
+receipts, and never changes host networking. Recorded local observations:
+
+| Shared loopback profile | Bulk acknowledged throughput | Interactive p95 echo | Interactive exchanges after bulk expiry |
+| --- | ---: | ---: | ---: |
+| 4 Mbit/s, 5 ms delay | 68.28 KiB/s | 82.516 ms | 52 |
+| 1 Mbit/s, 15 ms delay | 22.13 KiB/s | 261.116 ms | 45 |
+
+Both profiles retained independent progress and retired both endpoint
+authentication mappings on circuit expiry. The qdisc applies to all local
+control and game traffic in both directions; rate and latency vary together.
+See the [kernel counters and exact receipts](../research/relay-resource/evidence/2026-11-26-shared-netem.json).
+These measurements are not a physical-uplink or Minecraft gameplay result.
 Production multi-world fairness and measured bandwidth targets require
 separate evidence; do not promise a public unlimited community relay.
 A network administrator can observe traffic timing and transport metadata.
@@ -268,3 +284,17 @@ game-stream bytes, denied unlisted clients, relay outage and explicit
 replacement. These are local transport tests, **not** actual Minecraft login,
 public Internet reachability or physical NAT certification. See
 [network validation](NETWORK_VALIDATION.md) for field evidence requirements.
+
+For the optional Linux shared-network qualification, use the exact test
+executable printed by `cargo test --locked --offline -j 1 -p swarm-network
+--test game_stream_relay --no-run`, then run as an ordinary non-root user:
+
+```bash
+python3 scripts/acceptance/relay_resource.py \
+  --test /absolute/path/to/game_stream_relay-test-binary \
+  --artifacts /private/new-evidence-directory
+```
+
+The gate requires `unshare`, `ip`, `tc`, mapped user namespaces, and kernel
+netem support. It refuses existing evidence directories or unexpected network
+interfaces/qdiscs and does not silently fall back to an unshaped test.
