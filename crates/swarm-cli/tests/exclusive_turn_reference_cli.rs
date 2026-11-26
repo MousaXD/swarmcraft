@@ -1670,6 +1670,37 @@ fn runtime_intent_fences_handoff_across_process_exit_and_revocation_consumes_con
     assert_eq!(reserved["revision"], "2");
     assert_eq!(reserved["reference_operations_fenced"], true);
     assert_eq!(reserved["intent_kind"], "unlaunched_no_process_v1");
+    let probe = |revision: &str, intent: &str| {
+        cmd(
+            &f.profiles[0],
+            &[
+                "runtime",
+                "probe-java",
+                "--expected-world",
+                &f.world,
+                "--expected-grant",
+                &f.initial_grant,
+                "--expected-checkpoint",
+                checkpoint,
+                "--expected-revision",
+                revision,
+                "--expected-intent",
+                intent,
+                "--package",
+                path(&package),
+                "--confirm",
+            ],
+        )
+        .env_remove("SWARMCRAFT_HOST_CGROUP_ROOT")
+        .output()
+        .unwrap()
+    };
+    let reserved_bytes = fs::read(&state_path).unwrap();
+    rejected(probe("1", intent), "revision differs");
+    rejected(probe("2", &Hash32([9; 32]).to_string()), "exact unlaunched pin");
+    rejected(probe("2", intent), "explicit CPU cap requires a delegated Linux memory and CPU cgroup");
+    assert_eq!(fs::read(&state_path).unwrap(), reserved_bytes);
+    assert!(!f.store(0).join("probe-process.json").exists());
     for flag in [
         "capacity_verified",
         "resource_enforcement_verified",

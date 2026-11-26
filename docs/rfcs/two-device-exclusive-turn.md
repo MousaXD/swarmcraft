@@ -918,3 +918,66 @@ distinct durable process-ownership state, coordinate with the account-wide
 runtime reservation and kernel memory/CPU limits, and never reuse the
 unlaunched clear path for a possibly spawned process. Save-barrier and
 descendant-quiescence evidence must precede any live-to-offline handoff.
+
+### Isolated Java process qualification
+
+The `runtime probe-java` command is deliberately not a Minecraft server
+launcher. Given the exact currently reserved unlaunched intent, the
+holder must explicitly confirm its grant, checkpoint, revision, intent ID
+and reviewed package. The CLI rechecks the retained save and exact package,
+requires the same full hosting headroom check as the ordinary managed JVM,
+and requires an explicitly delegated Linux cgroup-v2 memory **and** CPU
+controller. It does not fall back to a heap-only process. The profile
+capacity lock, replica-only interlock and account-wide reservation are
+shared with normal hosting, without creating a canonical world or its
+hosting preference.
+
+```sh
+swarmcraft --data-dir "$PROFILE" exclusive-turn runtime probe-java \
+  --expected-world "$WORLD" --expected-grant "$GRANT" \
+  --expected-checkpoint "$COMMITMENT" --expected-revision "$REVISION" \
+  --expected-intent "$INTENT" --package "$PACKAGE" --confirm
+```
+
+Before any child can spawn, the signed intent changes to the distinct
+`java_probe_may_have_spawned_v1` variant. The consent lock spans durable
+publication, synchronous spawn and process birth-identity capture. Both
+local and account-wide process ownership records precede execution, and
+the kernel limits apply before Java exec. The fixed source-file Java
+program runs only in a new private scratch directory, under a sanitized
+environment with bounded log files, and waits for a stdin byte. The
+supervisor verifies the observed CPU and memory policy before releasing
+that gate. It polls current signed consent, process/cgroup membership and
+memory pressure, and imposes a bounded 60-second process deadline. The
+only accepted result is the exact reviewed Java release version, a
+successful exit, empty recorded cgroup, reverified package fingerprint
+and retired local/account ownership records. On success, the CLI consumes
+consent and clears the exact intent under the state lock. Reports are
+point-in-time qualification, never an authorization for a later launch.
+
+The old unlaunched clearance cannot retire a possibly-spawned intent.
+Errors, hard kills, ambiguous publication or withdrawal after the
+possibly-spawned transition leave the reference operations fenced, even
+when a process guard later proves the direct child gone. This milestone
+does not yet provide an explicit interrupted-probe recovery command; a
+new live adapter must not infer safety from an absent PID or a released
+kernel lock. No Minecraft server, world restore, game socket, Fabric
+readiness/permit, save barrier, or player admission is created. This
+executes reviewed Java bytes under resource limits, not a sandbox against
+malicious code or a publisher signature check.
+
+The separate local test fixture `research/exclusive-turn/qualify_java_probe.py`
+uses a fresh disposable delegated scope and copies the actual retained
+runtime artifacts. Its ignored Rust test exercises the process boundary
+with a fixed 512 MiB heap / 500 millicore preference, and may run without
+full game/client headroom solely in the test harness. That fixture cannot
+authorize a game or relax the production CLI admission check.
+
+The local delegated fixture passed using actual Temurin 25.0.5.1, with
+observed 500 millicore CPU and 1,536 MiB kernel memory cap, a 512 MiB
+heap preference and exact consent revision. It denied a second profile
+while the account reservation was held, then verified child/descendant
+quiescence and exact record retirement. A second probe withdrew consent
+before opening the gate and reaped the child. The 13 CLI regressions,
+212 library tests, targeted state-machine test and strict Clippy passed.
+[Retained evidence](../../research/exclusive-turn/evidence/2026-11-26-java-probe.txt).

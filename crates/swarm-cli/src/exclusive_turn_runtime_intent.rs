@@ -1,5 +1,5 @@
-//! Denial-only local runtime intent. No process launch, cgroup admission,
-//! save mutation or canonical authority is reachable from this module.
+//! Local runtime intent and isolated Java qualification. No Minecraft
+//! launch, save mutation or canonical authority is reachable here.
 //! Ordinary reference operations refuse an unresolved durable intent even
 //! after the controller exits or its journal lock is released.
 use super::{Pin, Reviewed, Store};
@@ -42,6 +42,19 @@ pub enum RuntimeCommand {
         expected_checkpoint: Hash32,
         #[arg(long)]
         expected_revision: u64,
+        #[arg(long)]
+        package: PathBuf,
+    },
+    /// Qualify the reviewed Java executable under mandatory kernel limits; never opens a world.
+    ProbeJava {
+        #[command(flatten)]
+        review: Reviewed,
+        #[arg(long)]
+        expected_checkpoint: Hash32,
+        #[arg(long)]
+        expected_revision: u64,
+        #[arg(long)]
+        expected_intent: Hash32,
         #[arg(long)]
         package: PathBuf,
     },
@@ -152,6 +165,18 @@ mod linux {
     enum IntentKind {
         // Do not reuse this variant for a process which could have been spawned.
         UnlaunchedNoProcessV1,
+        // Distinct persistent variant: never accepted by the unlaunched
+        // clear path, including by an older decoder.
+        JavaProbeMayHaveSpawnedV1,
+    }
+
+    impl IntentKind {
+        fn name(&self) -> &'static str {
+            match self {
+                Self::UnlaunchedNoProcessV1 => "unlaunched_no_process_v1",
+                Self::JavaProbeMayHaveSpawnedV1 => "java_probe_may_have_spawned_v1",
+            }
+        }
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -237,6 +262,50 @@ mod linux {
             Ok(())
         }
 
+        fn unlaunched_consent(&self, scope: &Scope, expected: u64, expected_intent: Hash32) -> Result<&Consent> {
+            ensure!(self.revision == expected, "runtime local revision differs from expected pin");
+            let intent = self.intent.as_ref().context("no unresolved runtime intent")?;
+            ensure!(
+                intent.kind == IntentKind::UnlaunchedNoProcessV1
+                    && intent.id()? == expected_intent
+                    && &intent.consent.scope == scope,
+                "runtime intent differs from exact unlaunched pin"
+            );
+            ensure!(self.consent.as_ref() == Some(&intent.consent), "runtime consent was withdrawn");
+            Ok(&intent.consent)
+        }
+
+        fn begin_probe(&mut self, scope: &Scope, expected: u64, expected_intent: Hash32) -> Result<Hash32> {
+            self.unlaunched_consent(scope, expected, expected_intent)?;
+            self.next(expected)?;
+            let intent = self.intent.as_mut().context("runtime intent disappeared")?;
+            intent.kind = IntentKind::JavaProbeMayHaveSpawnedV1;
+            intent.id()
+        }
+
+        fn check_probe(&self, scope: &Scope, expected: u64, expected_intent: Hash32) -> Result<()> {
+            ensure!(self.revision == expected, "runtime consent or local revision changed during Java qualification");
+            let intent = self.intent.as_ref().context("Java probe intent disappeared")?;
+            ensure!(
+                intent.kind == IntentKind::JavaProbeMayHaveSpawnedV1
+                    && intent.id()? == expected_intent
+                    && &intent.consent.scope == scope
+                    && self.consent.as_ref() == Some(&intent.consent),
+                "Java qualification lost exact local consent or intent"
+            );
+            Ok(())
+        }
+
+        // Only the successful in-process completion path calls this. The
+        // public clear command never retires a possibly-spawned intent.
+        fn finish_probe(&mut self, scope: &Scope, expected: u64, expected_intent: Hash32) -> Result<()> {
+            self.check_probe(scope, expected, expected_intent)?;
+            self.next(expected)?;
+            self.intent = None;
+            self.consent = None;
+            Ok(())
+        }
+
         fn revoke(&mut self, grant: Hash32, expected: u64) -> Result<()> {
             let consent = self.consent.as_ref().context("explicit local runtime consent is absent or withdrawn")?;
             ensure!(consent.scope.grant == grant, "runtime consent grant differs from expected pin");
@@ -266,6 +335,51 @@ mod linux {
             "runtime heap consent out of bounds"
         );
         swarm_cli::host_memory_cap::validate_cpu_request(cpu_millicores)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn possibly_spawned_probe_cannot_use_unlaunched_clear_or_stale_consent() {
+            let world: ExclusiveTurnWorldIdV1 = format!("scpass:{}", Hash32([1; 32])).parse().unwrap();
+            let peer = PeerIdentity::generate().peer_id();
+            let scope = Scope {
+                world,
+                holder: peer,
+                grant: Hash32([2; 32]),
+                epoch: 1,
+                fence: 1,
+                checkpoint: ExclusiveTurnCheckpointV1 {
+                    manifest_hash: Hash32([3; 32]),
+                    state_root: Hash32([4; 32]),
+                    reference_commitment: Hash32([5; 32]),
+                },
+                compatibility: Hash32([6; 32]),
+            };
+            let mut state = State::empty(world, peer);
+            state.opt_in(scope.clone(), 0, 512, 500).unwrap();
+            state.reserve(&scope, 1).unwrap();
+            let unlaunched = state.intent.as_ref().unwrap().id().unwrap();
+            assert!(state.begin_probe(&scope, 1, unlaunched).is_err());
+            let probe = state.begin_probe(&scope, 2, unlaunched).unwrap();
+            assert_ne!(unlaunched, probe);
+            state.validate(world, peer).unwrap();
+            assert!(state.clear(&scope, 3, probe).is_err());
+            assert!(state.clear(&scope, 3, unlaunched).is_err());
+            assert!(state.begin_probe(&scope, 3, probe).is_err());
+            state.check_probe(&scope, 3, probe).unwrap();
+            let mut withdrawn = state.clone();
+            withdrawn.revoke(scope.grant, 3).unwrap();
+            assert!(withdrawn.check_probe(&scope, 3, probe).is_err());
+            assert!(withdrawn.finish_probe(&scope, 4, probe).is_err());
+            assert!(withdrawn.clear(&scope, 4, probe).is_err());
+            assert!(withdrawn.intent.is_some());
+            state.finish_probe(&scope, 3, probe).unwrap();
+            assert_eq!(state.revision, 4);
+            assert!(state.intent.is_none() && state.consent.is_none());
+        }
     }
 
     #[derive(Serialize, Deserialize)]
@@ -377,9 +491,11 @@ mod linux {
             "consent_matches_current_held_scope": current.is_some_and(|scope| consent.is_some_and(|c| &c.scope == scope)),
             "intent_id": intent.map(Intent::id).transpose()?.map(|id|id.to_string()),
             "intent_scope": intent.map(|i|scope_report(&i.consent.scope)),
-            "intent_kind": intent.map(|_|"unlaunched_no_process_v1"),
+        "intent_kind": intent.map(|i|i.kind.name()),
             "reference_operations_fenced": intent.is_some(),
-            "capacity_verified": false, "resource_enforcement_verified": false, "process_spawned": false,
+            "capacity_verified": false, "resource_enforcement_verified": false,
+            "process_spawned": if intent.is_some_and(|i| i.kind == IntentKind::JavaProbeMayHaveSpawnedV1) { serde_json::Value::Null } else { false.into() },
+            "unresolved_possibly_spawned_intent": intent.is_some_and(|i| i.kind == IntentKind::JavaProbeMayHaveSpawnedV1),
             "save_barrier_verified": false, "canonical_authority": false, "write_authority": false,
             "runtime_activation": false, "player_admission": false, "minecraft_gameplay_verified": false,
         }))
@@ -469,6 +585,60 @@ mod linux {
                 persist(&directory, &peer, &state, true)?;
                 drop(lock);
                 print_document(&report(&state, None)?)
+            }
+            RuntimeCommand::ProbeJava { review, expected_checkpoint, expected_revision, expected_intent, package } => {
+                review.confirm()?;
+                let (store, journal, head) = opened(paths, &review.pin)?;
+                let scope = Scope::held(&journal, &head, expected_checkpoint)?;
+                let consent = {
+                    let _lock = lock_existing(&store.dir)?;
+                    let state =
+                        load(&store.dir, head.world(), &store.identity)?.context("runtime local state is absent")?;
+                    state.unlaunched_consent(&scope, expected_revision, expected_intent)?.clone()
+                };
+                // Fresh save and package verification, then account-wide
+                // resource admission. No launch-capable intent yet.
+                super::super::save::verify_held_package(&store, &journal, &head, &package)?;
+                let mut admission = swarm_cli::exclusive_turn_process_probe::ProbeAdmission::prepare(
+                    paths,
+                    &package,
+                    scope.compatibility,
+                    consent.heap_mib,
+                    consent.cpu_millicores,
+                    consent.revision,
+                )?;
+                let lock = lock_existing(&store.dir)?;
+                let mut state =
+                    load(&store.dir, head.world(), &store.identity)?.context("runtime local state disappeared")?;
+                let probe = state.begin_probe(&scope, expected_revision, expected_intent)?;
+                // Publish and fsync the possibly-spawned state BEFORE any
+                // child or its ownership record. Hold consent lock across
+                // the synchronous spawn and exact child identity capture.
+                persist(&store.dir, &store.identity, &state, true)?;
+                let revision = state.revision;
+                let running = admission.start(&store.dir)?;
+                drop(lock);
+                let check = || {
+                    let current =
+                        load(&store.dir, head.world(), &store.identity)?.context("runtime local state disappeared")?;
+                    current.check_probe(&scope, revision, probe)
+                };
+                let evidence = running.complete(check)?;
+                let lock = lock_existing(&store.dir)?;
+                let mut current =
+                    load(&store.dir, head.world(), &store.identity)?.context("runtime local state disappeared")?;
+                current.finish_probe(&scope, revision, probe)?;
+                persist(&store.dir, &store.identity, &current, true)?;
+                drop(lock);
+                drop(admission);
+                let mut result = report(&current, Some(&scope))?;
+                result["classification"] = "exclusive_turn_isolated_java_probe_completed".into();
+                result["probe_intent_id"] = probe.to_string().into();
+                result["capacity_verified"] = true.into();
+                result["resource_enforcement_verified"] = true.into();
+                result["process_spawned"] = true.into();
+                result["java_probe"] = serde_json::to_value(evidence)?;
+                print_document(&result)
             }
             RuntimeCommand::Clear { review, expected_checkpoint, expected_revision, expected_intent } => {
                 review.confirm()?;

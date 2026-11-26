@@ -70,9 +70,16 @@ impl<'a> RuntimeProcessGuard<'a> {
         paths: &DataPaths,
         world: WorldId,
         reservation: Option<&'a MachineHostingReservation>,
+        memory_cap: Option<HostMemoryCap>,
+    ) -> Result<Self> {
+        Self::begin_at(record_path(paths, world), reservation, memory_cap)
+    }
+
+    pub(crate) fn begin_at(
+        path: PathBuf,
+        reservation: Option<&'a MachineHostingReservation>,
         mut memory_cap: Option<HostMemoryCap>,
     ) -> Result<Self> {
-        let path = record_path(paths, world);
         clear_quiescent_record(&path)?;
         let mut record = RuntimeProcessRecord::pending()?;
         if let Some(cap) = memory_cap.as_mut() {

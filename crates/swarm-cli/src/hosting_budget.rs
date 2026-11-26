@@ -174,6 +174,24 @@ fn open_lock(path: &Path) -> Result<File> {
         .with_context(|| format!("cannot open hosting lock {}", path.display()))
 }
 
+// Reference runtime qualification shares capacity exclusion with canonical
+// hosting, but must never create a canonical world or its consent record.
+#[cfg(target_os = "linux")]
+pub(crate) fn reserve_reference_capacity(paths: &DataPaths) -> Result<(File, File, MachineHostingReservation)> {
+    let profile = hosting_profile_guard(paths)?;
+    let memory = open_lock(&control_path(paths).join("hosting-active-memory.lock"))?;
+    memory.try_lock_exclusive().context("another hosting admission is active in this profile")?;
+    runtime_process_guard::refuse_unaccounted_runtimes(paths)?;
+    let machine = MachineHostingReservation::acquire()?.context("Linux account reservation is unavailable")?;
+    Ok((profile, memory, machine))
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn reference_runtime_memory_pressure() -> Result<bool> {
+    let memory = memory_snapshot()?;
+    Ok(memory.available_mib < os_headroom_mib(memory.physical_mib))
+}
+
 /// Serializes an explicitly player-only local recovery operation with all
 /// consent mutations. This is not hosting admission or authority permission.
 #[cfg(unix)]

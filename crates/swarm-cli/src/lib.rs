@@ -6,6 +6,8 @@ pub mod directory_moderation;
 pub mod discovery;
 pub mod exclusive_turn_compatibility;
 #[cfg(target_os = "linux")]
+pub mod exclusive_turn_process_probe;
+#[cfg(target_os = "linux")]
 pub mod exclusive_turn_runtime_package;
 pub mod game_route_api;
 pub mod historical_authority;
