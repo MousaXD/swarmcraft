@@ -14,6 +14,7 @@ use crate::ownerless::verify_signature;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedExclusiveTurnHead {
     world: ExclusiveTurnWorldIdV1,
+    save_backed: bool,
     grant: Hash32,
     devices: [ExclusiveTurnDeviceV1; 2],
     holder: PeerId,
@@ -26,6 +27,11 @@ pub struct VerifiedExclusiveTurnHead {
 }
 
 impl VerifiedExclusiveTurnHead {
+    /// Signed genesis policy, not evidence of locally retained bytes.
+    pub fn save_backed(&self) -> bool {
+        self.save_backed
+    }
+
     pub fn world(&self) -> ExclusiveTurnWorldIdV1 {
         self.world
     }
@@ -161,6 +167,7 @@ pub fn verify_exclusive_turn_creation(
     }
     Ok(VerifiedExclusiveTurnHead {
         world: expected,
+        save_backed: genesis.save_backed(),
         grant: genesis.initial_grant_hash()?,
         devices: genesis.devices,
         holder: genesis.initial_holder,
@@ -221,6 +228,7 @@ pub fn apply_exclusive_turn_release(
     attempts[source_index] = offer.attempt;
     Ok(VerifiedExclusiveTurnHead {
         world: head.world,
+        save_backed: head.save_backed,
         grant: release.grant_hash()?,
         devices: head.devices,
         holder: offer.recipient,

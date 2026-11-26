@@ -502,16 +502,28 @@ impl Store {
                 )
             }
         }
-        self.state(journal.checkpoint)?;
+        self.verify_checkpoint(&head, journal.checkpoint)?;
         if let Some(staged) = &journal.staged {
             ensure!(
                 matches!(journal.phase, Phase::Replica | Phase::Released) && staged.offer.offer.recipient == local,
                 "invalid staged recipient phase"
             );
             verify_exclusive_turn_receipt(&head, &staged.offer, &staged.receipt)?;
-            self.state(staged.offer.offer.checkpoint)?;
+            self.verify_checkpoint(&head, staged.offer.offer.checkpoint)?;
         }
         Ok(head)
+    }
+
+    fn verify_checkpoint(
+        &self,
+        head: &VerifiedExclusiveTurnHead,
+        checkpoint: ExclusiveTurnCheckpointV1,
+    ) -> Result<Vec<u8>> {
+        let bytes = self.state(checkpoint)?;
+        if head.save_backed() {
+            save::verify_retained(self, checkpoint, head.compatibility(), &bytes)?;
+        }
+        Ok(bytes)
     }
 
     fn load(&self, world: ExclusiveTurnWorldIdV1) -> Result<(Journal, VerifiedExclusiveTurnHead)> {
@@ -558,6 +570,9 @@ fn report(head: &VerifiedExclusiveTurnHead, local: Option<&Journal>) -> serde_js
         "reference_epoch": head.epoch(),
         "reference_fence": head.fence(),
         "compatibility": head.compatibility().to_string(),
+        "save_backed_reference": head.save_backed(),
+        // Inspecting signatures alone does not prove local save retention.
+        "local_save_data_verified": head.save_backed() && local.is_some(),
         "grant_checkpoint": head.checkpoint(),
         "local_identity": local.map(|j| j.identity.to_string()),
         "local_phase": local.map(|j| j.phase.name()),
@@ -628,6 +643,11 @@ fn stage_reference(
         "incoming offer or recipient differs from expected pin"
     );
     offer.offer.checkpoint.verify_reference_bytes(bytes)?;
+    if head.save_backed() {
+        // The full bundle must already be durably retained before signing
+        // even the first receipt; a manifest by itself is insufficient.
+        save::verify_retained(store, offer.offer.checkpoint, head.compatibility(), bytes)?;
+    }
     if let Some(staged) = &journal.staged {
         if staged.offer == offer {
             ensure!(store.state(offer.offer.checkpoint)? == bytes, "staged reference bytes differ");
@@ -661,6 +681,7 @@ fn commit_reference(
     let Phase::Prepared(offer) = &journal.phase else { bail!("no prepared reference offer to commit") };
     ensure!(offer.offer_hash()? == expected_offer, "prepared offer differs from expected pin");
     verify_exclusive_turn_receipt(head, offer, &receipt)?;
+    store.verify_checkpoint(head, offer.offer.checkpoint)?;
     let mut release = ExclusiveTurnReleaseV1 { offer: offer.as_ref().clone(), receipt, signature: vec![] };
     release.signature = store.identity.sign(&release.signing_bytes()?);
     let next = apply_exclusive_turn_release(head, &release)?;
@@ -694,6 +715,7 @@ fn accept_reference(
                 && journal.checkpoint == head.checkpoint(),
             "release retry cannot restore a changed or nonheld reference turn"
         );
+        store.verify_checkpoint(head, journal.checkpoint)?;
         return Ok(head.clone());
     }
     pin_grant(head, expected_base)?;
@@ -705,6 +727,7 @@ fn accept_reference(
             && release.offer.offer.recipient == journal.identity,
         "release does not match exact retained recipient receipt"
     );
+    store.verify_checkpoint(head, release.offer.offer.checkpoint)?;
     let next = apply_exclusive_turn_release(head, &release)?;
     journal.history.releases.push(release);
     journal.phase = Phase::Held;
@@ -715,6 +738,92 @@ fn accept_reference(
     Ok(next)
 }
 
+fn draft_genesis(
+    format_version: u16,
+    device_keys: Vec<String>,
+    initial_holder: PeerId,
+    compatibility: Hash32,
+    initial_checkpoint: ExclusiveTurnCheckpointV1,
+) -> Result<ExclusiveTurnGenesisV1> {
+    ensure!(device_keys.len() == 2, "exactly two device keys required");
+    let mut devices = Vec::new();
+    for key in device_keys {
+        ensure!(key.len() == 64, "device public key must be 64 hex characters");
+        let key: [u8; 32] = hex::decode(key)?.try_into().map_err(|_| anyhow::anyhow!("invalid device key"))?;
+        devices.push(ExclusiveTurnDeviceV1::from_key(key));
+    }
+    devices.sort_by_key(|d| d.peer_id);
+    let genesis = ExclusiveTurnGenesisV1 {
+        format_version,
+        creation_nonce: random_nonce(),
+        devices: [devices[0], devices[1]],
+        initial_holder,
+        compatibility,
+        initial_checkpoint,
+    };
+    validate_exclusive_turn_genesis(&genesis)?;
+    Ok(genesis)
+}
+
+fn sign_approval(
+    paths: &DataPaths,
+    genesis: &ExclusiveTurnGenesisV1,
+    expected_world: ExclusiveTurnWorldIdV1,
+    bytes: &[u8],
+) -> Result<ExclusiveTurnApprovalV1> {
+    validate_exclusive_turn_genesis(genesis)?;
+    ensure!(genesis.world_id()? == expected_world, "genesis differs from expected identity pin");
+    genesis.initial_checkpoint.verify_reference_bytes(bytes)?;
+    let identity = identity(paths)?;
+    ensure!(
+        genesis.device(identity.peer_id()).is_some_and(|d| d.public_key == identity.public_key()),
+        "local identity is not a founding device"
+    );
+    let approval = ExclusiveTurnApprovalV1 {
+        world_id: expected_world,
+        device: identity.peer_id(),
+        signature: identity.sign(&genesis.approval_bytes(identity.peer_id())?),
+    };
+    verify_exclusive_turn_approval(expected_world, genesis, &approval)?;
+    Ok(approval)
+}
+
+fn initialize_reference(
+    paths: &DataPaths,
+    review: &Reviewed,
+    history: ExclusiveTurnHistoryV1,
+    bytes: &[u8],
+    bundle: Option<&Path>,
+) -> Result<()> {
+    review.confirm()?;
+    let world = review.pin.expected_world;
+    ensure!(history.releases.is_empty(), "initialization requires genesis only; no history reset");
+    let head = verify_exclusive_turn_history(world, &history)?;
+    pin_grant(&head, review.pin.expected_grant)?;
+    ensure!(head.save_backed() == bundle.is_some(), "save-backed genesis requires save init with complete bundle");
+    let identity = identity(paths)?;
+    local_member(&head, &identity)?;
+    head.checkpoint().verify_reference_bytes(bytes)?;
+    let store = Store::create(paths, world, identity)?;
+    if let Some(bundle) = bundle {
+        create_dir(&store.dir.join("save-bundles"))?;
+        save::retain_bundle(&store, bundle, head.checkpoint(), head.compatibility(), bytes)?;
+    }
+    store.retain(head.checkpoint(), bytes)?;
+    let local = store.identity.peer_id();
+    let journal = Journal {
+        format: EXCLUSIVE_TURN_FORMAT_V1,
+        identity: local,
+        history,
+        phase: if head.holder() == local { Phase::Held } else { Phase::Replica },
+        attempt: 0,
+        checkpoint: head.checkpoint(),
+        staged: None,
+    };
+    let head = store.save(world, &journal, false)?;
+    print_document(&report(&head, Some(&journal)))
+}
+
 pub fn run(paths: &DataPaths, command: ExclusiveTurnCommand) -> Result<()> {
     use ExclusiveTurnCommand::*;
     match command {
@@ -722,46 +831,22 @@ pub fn run(paths: &DataPaths, command: ExclusiveTurnCommand) -> Result<()> {
         Writer { command } => writer::run(paths, command),
         Network { command } => network::run(paths, command),
         Draft { device_keys, initial_holder, compatibility, state } => {
-            ensure!(device_keys.len() == 2, "exactly two device keys required");
-            let mut devices = Vec::new();
-            for key in device_keys {
-                ensure!(key.len() == 64, "device public key must be 64 hex characters");
-                let key: [u8; 32] = hex::decode(key)?.try_into().map_err(|_| anyhow::anyhow!("invalid device key"))?;
-                devices.push(ExclusiveTurnDeviceV1::from_key(key));
-            }
-            devices.sort_by_key(|d| d.peer_id);
             let (initial_checkpoint, _) = state.read()?;
-            let genesis = ExclusiveTurnGenesisV1 {
-                format_version: EXCLUSIVE_TURN_FORMAT_V1,
-                creation_nonce: random_nonce(),
-                devices: [devices[0], devices[1]],
+            let genesis = draft_genesis(
+                EXCLUSIVE_TURN_FORMAT_V1,
+                device_keys,
                 initial_holder,
                 compatibility,
                 initial_checkpoint,
-            };
-            validate_exclusive_turn_genesis(&genesis)?;
+            )?;
             print_document(&genesis)
         }
         Approve { draft, expected_world, checkpoint, confirm } => {
             ensure!(confirm, "explicit --confirm required for reviewed genesis approval");
             let genesis: ExclusiveTurnGenesisV1 = read_document(&draft)?;
-            validate_exclusive_turn_genesis(&genesis)?;
-            ensure!(genesis.world_id()? == expected_world, "genesis differs from expected identity pin");
-            genesis
-                .initial_checkpoint
-                .verify_reference_bytes(&read_bytes(&checkpoint, MAX_EXCLUSIVE_TURN_REFERENCE_BYTES)?)?;
-            let identity = identity(paths)?;
-            ensure!(
-                genesis.device(identity.peer_id()).is_some_and(|d| d.public_key == identity.public_key()),
-                "local identity is not a founding device"
-            );
-            let approval = ExclusiveTurnApprovalV1 {
-                world_id: expected_world,
-                device: identity.peer_id(),
-                signature: identity.sign(&genesis.approval_bytes(identity.peer_id())?),
-            };
-            verify_exclusive_turn_approval(expected_world, &genesis, &approval)?;
-            print_document(&approval)
+            ensure!(!genesis.save_backed(), "save-backed genesis requires save approve with complete bundle");
+            let bytes = read_bytes(&checkpoint, MAX_EXCLUSIVE_TURN_REFERENCE_BYTES)?;
+            print_document(&sign_approval(paths, &genesis, expected_world, &bytes)?)
         }
         Assemble { draft, expected_world, approvals } => {
             ensure!(approvals.len() == 2, "exactly two approvals required");
@@ -782,30 +867,9 @@ pub fn run(paths: &DataPaths, command: ExclusiveTurnCommand) -> Result<()> {
             print_document(&report(&head, None))
         }
         Init { review, history, checkpoint } => {
-            review.confirm()?;
-            let world = review.pin.expected_world;
             let history: ExclusiveTurnHistoryV1 = read_document(&history)?;
-            ensure!(history.releases.is_empty(), "initialization requires genesis only; no history reset");
-            let head = verify_exclusive_turn_history(world, &history)?;
-            pin_grant(&head, review.pin.expected_grant)?;
-            let identity = identity(paths)?;
-            local_member(&head, &identity)?;
             let bytes = read_bytes(&checkpoint, MAX_EXCLUSIVE_TURN_REFERENCE_BYTES)?;
-            head.checkpoint().verify_reference_bytes(&bytes)?;
-            let store = Store::create(paths, world, identity)?;
-            store.retain(head.checkpoint(), &bytes)?;
-            let local = store.identity.peer_id();
-            let journal = Journal {
-                format: EXCLUSIVE_TURN_FORMAT_V1,
-                identity: local,
-                history,
-                phase: if head.holder() == local { Phase::Held } else { Phase::Replica },
-                attempt: 0,
-                checkpoint: head.checkpoint(),
-                staged: None,
-            };
-            let head = store.save(world, &journal, false)?;
-            print_document(&report(&head, Some(&journal)))
+            initialize_reference(paths, &review, history, &bytes, None)
         }
         Status { expected_world } => {
             let store = Store::open(paths, expected_world)?;
@@ -815,6 +879,7 @@ pub fn run(paths: &DataPaths, command: ExclusiveTurnCommand) -> Result<()> {
         Checkpoint { review, expected_checkpoint, state } => {
             review.confirm()?;
             let (store, mut journal, head) = opened(paths, &review.pin)?;
+            ensure!(!head.save_backed(), "save-backed reference requires save checkpoint with complete bundle");
             let (checkpoint, bytes) = state.read()?;
             replace_checkpoint(&store, &mut journal, &head, expected_checkpoint, checkpoint, &bytes)?;
             print_document(&report(&head, Some(&journal)))
@@ -853,6 +918,7 @@ pub fn run(paths: &DataPaths, command: ExclusiveTurnCommand) -> Result<()> {
         Stage { review, offer, expected_offer, checkpoint } => {
             review.confirm()?;
             let (store, mut journal, head) = opened(paths, &review.pin)?;
+            ensure!(!head.save_backed(), "save-backed reference requires authenticated network handoff");
             let offer = read_document(&offer)?;
             let bytes = read_bytes(&checkpoint, MAX_EXCLUSIVE_TURN_REFERENCE_BYTES)?;
             print_document(&stage_reference(&store, &mut journal, &head, offer, expected_offer, &bytes)?)
@@ -860,11 +926,13 @@ pub fn run(paths: &DataPaths, command: ExclusiveTurnCommand) -> Result<()> {
         Commit { review, receipt, expected_offer } => {
             review.confirm()?;
             let (store, mut journal, head) = opened(paths, &review.pin)?;
+            ensure!(!head.save_backed(), "save-backed reference requires authenticated network handoff");
             let receipt = read_document(&receipt)?;
             print_document(&commit_reference(&store, &mut journal, &head, receipt, expected_offer)?)
         }
         ExportRelease { pin } => {
-            let (_store, journal, _) = opened(paths, &pin)?;
+            let (_store, journal, head) = opened(paths, &pin)?;
+            ensure!(!head.save_backed(), "save-backed reference requires exact authenticated network retry");
             ensure!(journal.phase == Phase::Released, "no still-current released reference outbox");
             print_document(journal.history.releases.last().context("missing release outbox")?)
         }
@@ -873,6 +941,7 @@ pub fn run(paths: &DataPaths, command: ExclusiveTurnCommand) -> Result<()> {
             let world = review.pin.expected_world;
             let store = Store::open(paths, world)?;
             let (mut journal, head) = store.load(world)?;
+            ensure!(!head.save_backed(), "save-backed reference requires authenticated network handoff");
             let release: ExclusiveTurnReleaseV1 = read_document(&release)?;
             let next =
                 accept_reference(&store, &mut journal, &head, release, review.pin.expected_grant, expected_release)?;

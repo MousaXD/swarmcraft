@@ -124,7 +124,7 @@ fn fixed_policy_creation_requires_two_distinct_canonical_keys_and_exact_approval
     bad.genesis.initial_holder = device(&key(90)).peer_id;
     assert!(bad.genesis.world_id().is_err());
     let mut bad = history.creation.clone();
-    bad.genesis.format_version += 1;
+    bad.genesis.format_version = EXCLUSIVE_TURN_SAVE_FORMAT_V2 + 1;
     assert!(bad.genesis.world_id().is_err());
     let mut bad = history.creation.clone();
     bad.genesis.compatibility = Hash32::default();
@@ -206,6 +206,38 @@ fn alternating_releases_bind_checkpoint_and_independent_attempt_floors() {
     assert!(last.checkpoint().verify_reference_bytes(b"checkpoint two").is_err());
     assert!(last.checkpoint().verify_reference_bytes(b"").is_err());
     assert!(exclusive_turn_reference_commitment(&vec![1; MAX_EXCLUSIVE_TURN_REFERENCE_BYTES + 1]).is_err());
+}
+
+#[test]
+fn save_policy_is_committed_to_world_identity_and_survives_release_history() {
+    let (keys, opaque) = fixture(17);
+    let original = head(&opaque);
+    assert!(!original.save_backed());
+    let mut save = opaque.clone();
+    save.creation.genesis.format_version = EXCLUSIVE_TURN_SAVE_FORMAT_V2;
+    let world = save.creation.genesis.world_id().unwrap();
+    assert_ne!(world, original.world());
+    assert_ne!(save.creation.genesis.initial_grant_hash().unwrap(), original.grant());
+    // No old approval or opaque grant can be reused for the new policy.
+    assert!(verify_exclusive_turn_history(world, &save).is_err());
+    for (i, approval) in save.creation.approvals.iter_mut().enumerate() {
+        approval.world_id = world;
+        approval.signature =
+            keys[i].sign(&save.creation.genesis.approval_bytes(approval.device).unwrap()).to_bytes().to_vec();
+    }
+    let base = head(&save);
+    assert!(base.save_backed());
+    let release = transfer(&base, 1, b"record-contract-only fixture", &keys[0], &keys[1]);
+    assert!(apply_exclusive_turn_release(&original, &release).is_err());
+    save.releases.push(release);
+    let next = head(&save);
+    assert!(next.save_backed());
+    assert_eq!(next.epoch(), 2);
+    let mut downgraded = save.clone();
+    downgraded.creation.genesis.format_version = EXCLUSIVE_TURN_FORMAT_V1;
+    assert!(verify_exclusive_turn_history(world, &downgraded).is_err());
+    assert!(verify_exclusive_turn_history(original.world(), &downgraded).is_err());
+    assert!(exclusive_turn_history_extends(original.world(), &opaque, &save).is_err());
 }
 
 #[test]

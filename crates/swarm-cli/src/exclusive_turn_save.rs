@@ -1,12 +1,12 @@
 //! Offline, separately verified save bundles. No canonical storage, JVM,
 //! hosting grant or runtime permit is created. Only cooperative local
 //! devices with a stopped Minecraft save are in the trust model.
-use super::Reviewed;
+use super::{Reviewed, Store};
 use anyhow::Result;
 use clap::{Args, Subcommand};
 use std::path::PathBuf;
 use swarm_core::DataPaths;
-use swarm_protocol::Hash32;
+use swarm_protocol::{ExclusiveTurnCheckpointV1, ExclusiveTurnSignedOfferV1, ExclusiveTurnWorldIdV1, Hash32, PeerId};
 
 #[derive(Debug, Args)]
 pub struct Digests {
@@ -20,6 +20,53 @@ pub struct Digests {
 
 #[derive(Debug, Subcommand)]
 pub enum SaveCommand {
+    /// Draft a new save-backed reference policy, not a playable world.
+    Draft {
+        #[arg(long = "device-key", required = true)]
+        device_keys: Vec<String>,
+        #[arg(long)]
+        initial_holder: PeerId,
+        #[arg(long)]
+        bundle: PathBuf,
+    },
+    /// Approve the exact save-backed genesis only after verifying every blob.
+    Approve {
+        #[arg(long)]
+        draft: PathBuf,
+        #[arg(long)]
+        expected_world: ExclusiveTurnWorldIdV1,
+        #[arg(long)]
+        bundle: PathBuf,
+        #[arg(long)]
+        confirm: bool,
+    },
+    /// Initialize a fresh save-backed reference journal with a complete bundle.
+    Init {
+        #[command(flatten)]
+        review: Reviewed,
+        #[arg(long)]
+        history: PathBuf,
+        #[arg(long)]
+        bundle: PathBuf,
+    },
+    /// Replace the held save-backed reference checkpoint with verified data.
+    Checkpoint {
+        #[command(flatten)]
+        review: Reviewed,
+        #[arg(long)]
+        expected_checkpoint: Hash32,
+        #[arg(long)]
+        bundle: PathBuf,
+    },
+    /// Materialize the exact held checkpoint into a new offline directory.
+    RestoreHeld {
+        #[command(flatten)]
+        review: Reviewed,
+        #[arg(long)]
+        expected_checkpoint: Hash32,
+        #[arg(long)]
+        destination: PathBuf,
+    },
     /// Capture a stopped Minecraft-shaped save into a new immutable bundle.
     Capture {
         #[arg(long)]
@@ -56,7 +103,7 @@ pub enum SaveCommand {
         #[arg(long)]
         expected_offer: Hash32,
         #[arg(long)]
-        bundle: PathBuf,
+        bundle: Option<PathBuf>,
         #[arg(long)]
         bind: std::net::SocketAddr,
     },
@@ -69,7 +116,7 @@ pub enum SaveCommand {
         #[arg(long)]
         offer: PathBuf,
         #[arg(long)]
-        destination: PathBuf,
+        destination: Option<PathBuf>,
         #[arg(long)]
         peer: String,
     },
@@ -86,9 +133,39 @@ pub(super) fn run(paths: &DataPaths, command: SaveCommand) -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
+pub(super) use linux::{retain_bundle, verify_offer_bundle, verify_retained};
+
+#[cfg(not(target_os = "linux"))]
+pub(super) fn verify_retained(
+    _store: &Store,
+    _checkpoint: ExclusiveTurnCheckpointV1,
+    _compatibility: Hash32,
+    _bytes: &[u8],
+) -> Result<()> {
+    anyhow::bail!("save-backed reference storage is Linux only")
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(super) fn verify_offer_bundle(_store: &Store, _offer: &ExclusiveTurnSignedOfferV1) -> Result<()> {
+    anyhow::bail!("save-backed reference storage is Linux only")
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(super) fn retain_bundle(
+    _store: &Store,
+    _source: &std::path::Path,
+    _checkpoint: ExclusiveTurnCheckpointV1,
+    _compatibility: Hash32,
+    _bytes: &[u8],
+) -> Result<()> {
+    anyhow::bail!("save-backed reference storage is Linux only")
+}
+
+#[cfg(target_os = "linux")]
 mod linux {
     use super::super::{
-        check_dir, create_dir, open_regular, opened, print_document, private_file, read_document, sync_dir, Phase,
+        check_dir, create_dir, draft_genesis, initialize_reference, open_regular, opened, print_document, private_file,
+        read_document, replace_checkpoint, report as journal_report, sign_approval, sync_dir, Phase,
     };
     use super::*;
     use crate::reference_channel::{authenticate, private_ip, remaining, Channel};
@@ -111,13 +188,14 @@ mod linux {
     };
     use swarm_consensus::exclusive_turn::verify_exclusive_turn_offer;
     use swarm_protocol::{
-        exclusive_turn_reference_commitment, ExclusiveTurnCheckpointV1, ExclusiveTurnSignedOfferV1,
-        ExclusiveTurnWorldIdV1, PeerId, MAX_EXCLUSIVE_TURN_REFERENCE_BYTES,
+        exclusive_turn_reference_commitment, ExclusiveTurnGenesisV1, ExclusiveTurnHistoryV1,
+        EXCLUSIVE_TURN_SAVE_FORMAT_V2, MAX_EXCLUSIVE_TURN_REFERENCE_BYTES,
     };
 
     const MAX_ENTRIES: usize = 4096;
     const MAX_FILE: u64 = 512 * 1024 * 1024;
     const MAX_TOTAL: u64 = 2 * 1024 * 1024 * 1024;
+    const MAX_RETAINED_BUNDLES: usize = 16;
     const DISK_RESERVE: u64 = 1024 * 1024 * 1024;
     const CHUNK: usize = 32 * 1024;
     const SESSION: Duration = Duration::from_secs(120);
@@ -556,6 +634,86 @@ mod linux {
         Ok(())
     }
 
+    fn retained_path(store: &Store, checkpoint: ExclusiveTurnCheckpointV1) -> Result<PathBuf> {
+        let root = store.dir.join("save-bundles");
+        check_dir(&root)?;
+        Ok(root.join(checkpoint.reference_commitment.to_string()))
+    }
+
+    fn check_retention_capacity(destination: &Path) -> Result<()> {
+        let root = destination.parent().context("missing managed save bundle root")?;
+        check_dir(root)?;
+        let count = fs::read_dir(root)?.take(MAX_RETAINED_BUNDLES).collect::<std::io::Result<Vec<_>>>()?.len();
+        ensure!(count < MAX_RETAINED_BUNDLES, "save-backed retained bundle limit reached");
+        Ok(())
+    }
+
+    fn verify_exact(
+        bundle: &Path,
+        checkpoint: ExclusiveTurnCheckpointV1,
+        compatibility: Hash32,
+        bytes: &[u8],
+    ) -> Result<Manifest> {
+        let manifest = load_bundle(bundle)?;
+        ensure!(
+            manifest.checkpoint()? == checkpoint
+                && manifest.compatibility == compatibility
+                && manifest.encode()? == bytes,
+            "managed save bundle differs from exact checkpoint and compatibility"
+        );
+        verify_bundle(bundle, &manifest)?;
+        Ok(manifest)
+    }
+
+    pub(in super::super) fn verify_retained(
+        store: &Store,
+        checkpoint: ExclusiveTurnCheckpointV1,
+        compatibility: Hash32,
+        bytes: &[u8],
+    ) -> Result<()> {
+        let path = retained_path(store, checkpoint)?;
+        verify_exact(&path, checkpoint, compatibility, bytes).context("complete retained save bundle is required")?;
+        // Recover a prior successful rename whose parent fsync or output
+        // failed before acknowledging the durable bundle.
+        sync_dir(path.parent().context("missing managed save parent")?)
+    }
+
+    pub(in super::super) fn verify_offer_bundle(store: &Store, offer: &ExclusiveTurnSignedOfferV1) -> Result<()> {
+        let path = retained_path(store, offer.offer.checkpoint)?;
+        let manifest = load_bundle(&path).context("complete retained save bundle is required")?;
+        manifest.check_offer(offer)?;
+        verify_retained(store, offer.offer.checkpoint, offer.offer.compatibility, &manifest.encode()?)
+    }
+
+    pub(in super::super) fn retain_bundle(
+        store: &Store,
+        source: &Path,
+        checkpoint: ExclusiveTurnCheckpointV1,
+        compatibility: Hash32,
+        bytes: &[u8],
+    ) -> Result<()> {
+        let manifest = verify_exact(source, checkpoint, compatibility, bytes)?;
+        let destination = retained_path(store, checkpoint)?;
+        match fs::symlink_metadata(&destination) {
+            Ok(_) => return verify_retained(store, checkpoint, compatibility, bytes),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        check_retention_capacity(&destination)?;
+        let publication = Publication::new(&destination, manifest.validate()?)?;
+        create_dir(&publication.path().join("blobs"))?;
+        for (hash, size) in manifest.blobs() {
+            let input = private_file(&blob_path(source, hash))?;
+            let mut output = create_file(&blob_path(publication.path(), hash))?;
+            ensure!(copy_blob(&input, Some(&mut output), size)? == hash, "save blob changed during retention");
+            output.sync_all()?;
+        }
+        store_manifest(publication.path(), &manifest)?;
+        verify_bundle(publication.path(), &manifest)?;
+        publication.finish()?;
+        verify_retained(store, checkpoint, compatibility, bytes)
+    }
+
     fn capture(source: &Path, destination: &Path, compatibility: Hash32) -> Result<(Manifest, PathBuf)> {
         ensure!(compatibility != Hash32::default(), "save compatibility must be nonzero");
         let source = safe_directory(source)?;
@@ -718,22 +876,32 @@ mod linux {
         Ok(())
     }
 
-    fn receive_blob(channel: &mut Channel, bundle: &Path, hash: Hash32, size: u64) -> Result<()> {
-        let mut file = create_file(&blob_path(bundle, hash))?;
+    fn receive_blob(channel: &mut Channel, bundle: Option<&Path>, hash: Hash32, size: u64) -> Result<()> {
+        let mut file = bundle.map(|p| create_file(&blob_path(p, hash))).transpose()?;
         let mut left = size;
         let mut digest = hash_start();
         while left > 0 {
             let chunk = channel.recv_chunk(left.min(CHUNK as u64) as usize)?;
             digest.update(&chunk);
-            file.write_all(&chunk)?;
+            if let Some(file) = &mut file {
+                file.write_all(&chunk)?;
+            }
             left -= chunk.len() as u64;
         }
         ensure!(hash_finish(digest) == hash, "received save blob digest differs");
-        file.sync_all()?;
+        if let Some(file) = file {
+            file.sync_all()?;
+        }
         Ok(())
     }
 
-    fn serve(paths: &DataPaths, review: &Reviewed, expected: Hash32, bundle: &Path, bind: SocketAddr) -> Result<()> {
+    fn serve(
+        paths: &DataPaths,
+        review: &Reviewed,
+        expected: Hash32,
+        bundle: Option<&Path>,
+        bind: SocketAddr,
+    ) -> Result<()> {
         review.confirm()?;
         ensure!(private_ip(bind.ip()), "save listener must use an explicit private address");
         let (store, journal, head) = opened(paths, &review.pin)?;
@@ -744,6 +912,14 @@ mod linux {
             offer.offer_hash()? == expected && offer.offer.source == journal.identity,
             "prepared save offer differs from pin"
         );
+        let managed;
+        let bundle = if head.save_backed() {
+            ensure!(bundle.is_none(), "save-backed source uses only its managed retained bundle");
+            managed = retained_path(&store, journal.checkpoint)?;
+            managed.as_path()
+        } else {
+            bundle.context("opaque reference source requires --bundle")?
+        };
         let manifest = load_bundle(bundle)?;
         manifest.check_offer(offer)?;
         ensure!(
@@ -784,7 +960,7 @@ mod linux {
         review: &Reviewed,
         expected: Hash32,
         file: &Path,
-        destination: &Path,
+        destination: Option<&Path>,
         peer: &str,
     ) -> Result<()> {
         review.confirm()?;
@@ -814,30 +990,139 @@ mod linux {
         );
         let key =
             head.devices().iter().find(|d| d.peer_id == remote).context("save source not fixed device")?.public_key;
-        // Refuse existing destinations before connecting. Publication also
-        // uses a kernel no-clobber rename after complete verification.
-        absent(destination)?;
+        // A save-backed recipient can publish only into its own
+        // content-addressed store. An exact already-retained bundle
+        // may be reverified on a lost completion marker, never replaced.
+        let managed;
+        let destination = if head.save_backed() {
+            ensure!(destination.is_none(), "save-backed fetch uses only its managed retained bundle");
+            managed = retained_path(&store, offer.offer.checkpoint)?;
+            managed.as_path()
+        } else {
+            destination.context("opaque reference fetch requires --destination")?
+        };
+        let retained = match fs::symlink_metadata(destination) {
+            Ok(_) if head.save_backed() => {
+                verify_offer_bundle(&store, &offer)?;
+                true
+            }
+            Ok(_) => bail!("save destination already exists; no replacement permitted"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if head.save_backed() {
+                    check_retention_capacity(destination)?;
+                }
+                false
+            }
+            Err(e) => return Err(e.into()),
+        };
         let deadline = Instant::now() + SESSION;
         let stream = TcpStream::connect_timeout(&address, remaining(deadline)?)?;
         let mut channel = authenticate(stream, &prologue(&offer)?, AUTH_DOMAIN, &store.identity, key, true, deadline)?;
         let bytes = channel.receive(MAX_EXCLUSIVE_TURN_REFERENCE_BYTES)?;
         let manifest = Manifest::decode(&bytes)?;
         manifest.check_offer(&offer)?;
-        let publication = Publication::new(destination, manifest.validate()?)?;
-        create_dir(&publication.path().join("blobs"))?;
+        let publication = if retained {
+            ensure!(load_bundle(destination)? == manifest, "retained save manifest differs");
+            None
+        } else {
+            let publication = Publication::new(destination, manifest.validate()?)?;
+            create_dir(&publication.path().join("blobs"))?;
+            Some(publication)
+        };
         for (hash, size) in manifest.blobs() {
-            receive_blob(&mut channel, publication.path(), hash, size)?;
+            receive_blob(&mut channel, publication.as_ref().map(Publication::path), hash, size)?;
         }
-        store_manifest(publication.path(), &manifest)?;
-        verify_bundle(publication.path(), &manifest)?;
+        if let Some(publication) = publication {
+            store_manifest(publication.path(), &manifest)?;
+            verify_bundle(publication.path(), &manifest)?;
+            remaining(deadline)?;
+            publication.finish()?;
+        }
+        if head.save_backed() {
+            verify_retained(&store, offer.offer.checkpoint, head.compatibility(), &bytes)?;
+        }
         remaining(deadline)?;
-        let destination = publication.finish()?;
         channel.send_chunk(&manifest.checkpoint()?.manifest_hash.0)?;
-        report(&manifest, &destination, "exclusive_turn_save_data_received")
+        report(&manifest, destination, "exclusive_turn_save_data_received")
     }
 
     pub(super) fn run(paths: &DataPaths, command: SaveCommand) -> Result<()> {
         match command {
+            SaveCommand::Draft { device_keys, initial_holder, bundle } => {
+                let manifest = load_bundle(&bundle)?;
+                verify_bundle(&bundle, &manifest)?;
+                print_document(&draft_genesis(
+                    EXCLUSIVE_TURN_SAVE_FORMAT_V2,
+                    device_keys,
+                    initial_holder,
+                    manifest.compatibility,
+                    manifest.checkpoint()?,
+                )?)
+            }
+            SaveCommand::Approve { draft, expected_world, bundle, confirm } => {
+                ensure!(confirm, "explicit --confirm required for reviewed save genesis approval");
+                let genesis: ExclusiveTurnGenesisV1 = read_document(&draft)?;
+                ensure!(
+                    genesis.save_backed() && genesis.world_id()? == expected_world,
+                    "save-backed genesis differs from expected pin"
+                );
+                let manifest = load_bundle(&bundle)?;
+                let bytes = manifest.encode()?;
+                verify_exact(&bundle, genesis.initial_checkpoint, genesis.compatibility, &bytes)?;
+                print_document(&sign_approval(paths, &genesis, expected_world, &bytes)?)
+            }
+            SaveCommand::Init { review, history, bundle } => {
+                review.confirm()?;
+                let history: ExclusiveTurnHistoryV1 = read_document(&history)?;
+                let genesis = &history.creation.genesis;
+                ensure!(genesis.save_backed(), "save init requires a save-backed genesis");
+                let bytes = load_bundle(&bundle)?.encode()?;
+                verify_exact(&bundle, genesis.initial_checkpoint, genesis.compatibility, &bytes)?;
+                initialize_reference(paths, &review, history, &bytes, Some(&bundle))
+            }
+            SaveCommand::Checkpoint { review, expected_checkpoint, bundle } => {
+                review.confirm()?;
+                let (store, mut journal, head) = opened(paths, &review.pin)?;
+                ensure!(
+                    head.save_backed() && journal.phase == Phase::Held,
+                    "save checkpoint requires held save-backed reference turn"
+                );
+                ensure!(
+                    journal.checkpoint.reference_commitment == expected_checkpoint,
+                    "local checkpoint differs from expected pin"
+                );
+                let manifest = load_bundle(&bundle)?;
+                let checkpoint = manifest.checkpoint()?;
+                let bytes = manifest.encode()?;
+                retain_bundle(&store, &bundle, checkpoint, head.compatibility(), &bytes)?;
+                replace_checkpoint(&store, &mut journal, &head, expected_checkpoint, checkpoint, &bytes)?;
+                print_document(&journal_report(&head, Some(&journal)))
+            }
+            SaveCommand::RestoreHeld { review, expected_checkpoint, destination } => {
+                review.confirm()?;
+                let (store, journal, head) = opened(paths, &review.pin)?;
+                ensure!(
+                    head.save_backed() && journal.phase == Phase::Held && head.holder() == journal.identity,
+                    "restore-held requires exact held save-backed reference turn"
+                );
+                ensure!(
+                    journal.checkpoint.reference_commitment == expected_checkpoint,
+                    "local checkpoint differs from expected pin"
+                );
+                let bundle = retained_path(&store, journal.checkpoint)?;
+                let manifest = load_bundle(&bundle)?;
+                verify_exact(&bundle, journal.checkpoint, head.compatibility(), &store.state(journal.checkpoint)?)?;
+                // Never materialize inside the managed authority profile.
+                let parent = safe_directory(
+                    destination.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new(".")),
+                )?;
+                ensure!(
+                    !parent.starts_with(safe_directory(&paths.root)?),
+                    "offline restoration cannot target authority profile"
+                );
+                let destination = restore(&bundle, &destination, &manifest)?;
+                report(&manifest, &destination, "exclusive_turn_held_save_data_restored")
+            }
             SaveCommand::Capture { source, destination, compatibility, confirm } => {
                 ensure!(confirm, "explicit --confirm required for offline save capture");
                 let (manifest, destination) = capture(&source, &destination, compatibility)?;
@@ -857,10 +1142,10 @@ mod linux {
                 report(&manifest, &destination, "exclusive_turn_save_data_restored")
             }
             SaveCommand::Serve { review, expected_offer, bundle, bind } => {
-                serve(paths, &review, expected_offer, &bundle, bind)
+                serve(paths, &review, expected_offer, bundle.as_deref(), bind)
             }
             SaveCommand::Fetch { review, expected_offer, offer, destination, peer } => {
-                fetch(paths, &review, expected_offer, &offer, &destination, &peer)
+                fetch(paths, &review, expected_offer, &offer, destination.as_deref(), &peer)
             }
         }
     }

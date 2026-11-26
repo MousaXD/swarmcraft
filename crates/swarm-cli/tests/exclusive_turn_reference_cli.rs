@@ -78,6 +78,128 @@ struct Fixture {
 }
 
 impl Fixture {
+    fn new_save_backed() -> (Self, PathBuf, PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let profiles = std::array::from_fn(|i| temp.path().join(format!("device-{i}")));
+        let identities =
+            std::array::from_fn(|i| PeerIdentity::load_or_create(&DataPaths::from_root(&profiles[i])).unwrap());
+        let source = offline_save(temp.path());
+        let bundle = temp.path().join("initial-bundle");
+        let organizer = temp.path().join("organizer");
+        let captured = json(capture_save(&organizer, &source, &bundle).output().unwrap());
+        let initial = bundle.join("manifest.postcard");
+        let draft = temp.path().join("save-draft.json");
+        let keys = [hex::encode(identities[0].public_key()), hex::encode(identities[1].public_key())];
+        let draft_bytes = success(
+            save_cmd(&organizer, "draft")
+                .args([
+                    "--device-key",
+                    &keys[0],
+                    "--device-key",
+                    &keys[1],
+                    "--initial-holder",
+                    &identities[0].peer_id().to_string(),
+                    "--bundle",
+                    path(&bundle),
+                ])
+                .output()
+                .unwrap(),
+        );
+        fs::write(&draft, &draft_bytes).unwrap();
+        let genesis: ExclusiveTurnGenesisV1 = serde_json::from_slice(&draft_bytes).unwrap();
+        assert!(genesis.save_backed());
+        let world = genesis.world_id().unwrap().to_string();
+        let initial_grant = genesis.initial_grant_hash().unwrap().to_string();
+        assert_eq!(genesis.initial_checkpoint.reference_commitment.to_string(), captured["reference_commitment"]);
+        rejected(
+            invoke(
+                &profiles[0],
+                &[
+                    "approve",
+                    "--draft",
+                    path(&draft),
+                    "--expected-world",
+                    &world,
+                    "--checkpoint",
+                    path(&initial),
+                    "--confirm",
+                ],
+            ),
+            "requires save approve",
+        );
+        let approve = |i: usize| {
+            save_cmd(&profiles[i], "approve")
+                .args(["--draft", path(&draft), "--expected-world", &world, "--bundle", path(&bundle), "--confirm"])
+                .output()
+                .unwrap()
+        };
+        let blob = bundle.join("blobs").join(
+            Hash32::from_domain_bytes(b"swarmcraft/exclusive-turn/save-blob/v1\0", b"synthetic level.dat fixture")
+                .to_string(),
+        );
+        let hidden = temp.path().join("temporarily-missing-blob");
+        fs::rename(&blob, &hidden).unwrap();
+        rejected(approve(0), "missing blob");
+        fs::rename(&hidden, &blob).unwrap();
+        rejected(approve(2), "not a founding device");
+        let approvals: [PathBuf; 2] = std::array::from_fn(|i| {
+            let file = temp.path().join(format!("save-approval-{i}.json"));
+            fs::write(&file, success(approve(i))).unwrap();
+            file
+        });
+        let history = temp.path().join("save-history.json");
+        fs::write(
+            &history,
+            success(invoke(
+                &organizer,
+                &[
+                    "assemble",
+                    "--draft",
+                    path(&draft),
+                    "--expected-world",
+                    &world,
+                    "--approval",
+                    path(&approvals[0]),
+                    "--approval",
+                    path(&approvals[1]),
+                ],
+            )),
+        )
+        .unwrap();
+        let inspected = json(invoke(&organizer, &["inspect", "--history", path(&history), "--expected-world", &world]));
+        assert_eq!(inspected["save_backed_reference"], true);
+        assert_eq!(inspected["local_save_data_verified"], false);
+        assert!(!organizer.exists());
+        let f = Self { temp, profiles, identities, world, initial_grant, initial, history };
+        rejected(
+            f.mutate(0, "init", &f.initial_grant, &["--history", path(&f.history), "--checkpoint", path(&f.initial)]),
+            "requires save init",
+        );
+        assert!(!f.store(0).exists());
+        for i in 0..2 {
+            let result = json(
+                save_cmd(&f.profiles[i], "init")
+                    .args([
+                        "--expected-world",
+                        &f.world,
+                        "--expected-grant",
+                        &f.initial_grant,
+                        "--confirm",
+                        "--history",
+                        path(&f.history),
+                        "--bundle",
+                        path(&bundle),
+                    ])
+                    .output()
+                    .unwrap(),
+            );
+            report(&result, if i == 0 { "held" } else { "replica" }, 1);
+            assert_eq!(result["save_backed_reference"], true);
+            assert_eq!(result["local_save_data_verified"], true);
+        }
+        (f, source, bundle)
+    }
+
     fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
         let profiles = std::array::from_fn(|i| temp.path().join(format!("device-{i}")));
@@ -199,6 +321,10 @@ impl Fixture {
 
     fn state(&self, i: usize, commitment: Hash32) -> PathBuf {
         self.store(i).join("checkpoints").join(format!("{commitment}.bin"))
+    }
+
+    fn managed_bundle(&self, i: usize, commitment: &str) -> PathBuf {
+        self.store(i).join("save-bundles").join(commitment)
     }
 
     fn snapshot(&self, i: usize) -> Vec<u8> {
@@ -759,7 +885,6 @@ fn confirmed(
     }
     // Independently verify the actual recipient receipt's exact canonical
     // postcard input, not merely its presence or the source process exit.
-    let release: ExclusiveTurnReleaseV1 = serde_json::from_slice(&f.export(1 - recipient, grant)).unwrap();
     #[derive(serde::Serialize)]
     struct AckBody {
         world: ExclusiveTurnWorldIdV1,
@@ -775,7 +900,7 @@ fn confirmed(
         world: offer.offer.world_id,
         base: offer.offer.parent_grant,
         offer: offer.offer_hash().unwrap(),
-        grant: release.grant_hash().unwrap(),
+        grant: grant.parse().unwrap(),
         recipient: offer.offer.recipient,
         epoch,
         fence: epoch,
@@ -1371,13 +1496,16 @@ impl Fixture {
     }
 
     fn save_serve(&self, base: &str, offer: &str, bundle: &Path) -> (Server, SocketAddr) {
-        let child = self
-            .save_transfer(0, "serve", base, offer)
-            .args(["--bundle", path(bundle), "--bind", "127.0.0.1:0"])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+        self.save_listener(0, base, offer, Some(bundle))
+    }
+
+    fn save_listener(&self, source: usize, base: &str, offer: &str, bundle: Option<&Path>) -> (Server, SocketAddr) {
+        let mut command = self.save_transfer(source, "serve", base, offer);
+        if let Some(bundle) = bundle {
+            command.args(["--bundle", path(bundle)]);
+        }
+        let child =
+            command.args(["--bind", "127.0.0.1:0"]).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
         let mut server = Server(Some(child));
         let mut line = String::new();
         BufReader::new(server.0.as_mut().unwrap().stdout.as_mut().unwrap()).read_line(&mut line).unwrap();
@@ -1392,14 +1520,54 @@ impl Fixture {
     }
 
     fn save_fetch(&self, base: &str, offer: &str, file: &Path, destination: &Path, address: SocketAddr) -> Output {
-        self.save_transfer(1, "fetch", base, offer)
+        self.fetch_save(1, base, offer, file, Some(destination), address)
+    }
+
+    fn fetch_save(
+        &self,
+        recipient: usize,
+        base: &str,
+        offer: &str,
+        file: &Path,
+        destination: Option<&Path>,
+        address: SocketAddr,
+    ) -> Output {
+        let mut command = self.save_transfer(recipient, "fetch", base, offer);
+        if let Some(destination) = destination {
+            command.args(["--destination", path(destination)]);
+        }
+        command
+            .args(["--offer", path(file), "--peer", &format!("{}@{address}", self.identities[1 - recipient].peer_id())])
+            .output()
+            .unwrap()
+    }
+
+    fn restore_held(&self, device: usize, grant: &str, commitment: &str, destination: &Path) -> Output {
+        save_cmd(&self.profiles[device], "restore-held")
             .args([
-                "--offer",
-                path(file),
+                "--expected-world",
+                &self.world,
+                "--expected-grant",
+                grant,
+                "--expected-checkpoint",
+                commitment,
                 "--destination",
                 path(destination),
-                "--peer",
-                &format!("{}@{address}", self.identities[0].peer_id()),
+                "--confirm",
+            ])
+            .output()
+            .unwrap()
+    }
+
+    fn serve_checked_offer(&self, target: usize, grant: &str, hash: &str, offer: &Path) -> Output {
+        self.network(target, "serve-handoff", grant, hash)
+            .args([
+                "--offer",
+                path(offer),
+                "--from",
+                &self.identities[1 - target].peer_id().to_string(),
+                "--bind",
+                "127.0.0.1:0",
             ])
             .output()
             .unwrap()
@@ -1525,6 +1693,218 @@ fn authenticated_save_blob_transfer_is_exact_and_never_releases_a_turn() {
     );
     assert_save_flags(&result, "exclusive_turn_save_data_restored");
     assert_same_save(&source, &restored);
+    f.assert_no_live_storage();
+}
+
+#[test]
+fn save_backed_release_requires_full_retention_before_and_after_commit() {
+    let (f, source, original_bundle) = Fixture::new_save_backed();
+    let initial = exclusive_turn_reference_commitment(&fs::read(&f.initial).unwrap()).unwrap().to_string();
+    let output = f.temp.path().join("initial-restore");
+    assert_save_flags(
+        &json(f.restore_held(0, &f.initial_grant, &initial, &output)),
+        "exclusive_turn_held_save_data_restored",
+    );
+    assert_same_save(&source, &output);
+    rejected(f.restore_held(1, &f.initial_grant, &initial, &f.temp.path().join("not-holder")), "requires exact held");
+    rejected(f.writer_serve(0, &f.initial_grant, &initial, 1).output().unwrap(), "opaque writer is unavailable");
+    rejected(
+        f.mutate(
+            0,
+            "checkpoint",
+            &f.initial_grant,
+            &[
+                "--expected-checkpoint",
+                &initial,
+                "--checkpoint",
+                path(&f.initial),
+                "--manifest-hash",
+                &Hash32([4; 32]).to_string(),
+                "--state-root",
+                &Hash32([5; 32]).to_string(),
+            ],
+        ),
+        "requires save checkpoint",
+    );
+
+    // New checkpoint contains actual changed bytes, not just a manifest update.
+    let changed_level = b"second synthetic level.dat checkpoint";
+    fs::write(source.join("level.dat"), changed_level).unwrap();
+    let next_bundle = f.temp.path().join("next-save-bundle");
+    let captured = json(capture_save(&f.profiles[0], &source, &next_bundle).output().unwrap());
+    let next = captured["reference_commitment"].as_str().unwrap().to_owned();
+    assert_ne!(next, initial);
+    let updated = json(
+        save_cmd(&f.profiles[0], "checkpoint")
+            .args([
+                "--expected-world",
+                &f.world,
+                "--expected-grant",
+                &f.initial_grant,
+                "--expected-checkpoint",
+                &initial,
+                "--bundle",
+                path(&next_bundle),
+                "--confirm",
+            ])
+            .output()
+            .unwrap(),
+    );
+    report(&updated, "held", 1);
+    assert_eq!(updated["local_save_data_verified"], true);
+    let (offer, bytes) = f.prepare(0, &f.initial_grant, &next);
+    let hash = offer.offer_hash().unwrap().to_string();
+    let file = f.put("save-backed-offer.json", &bytes);
+    let before = [f.snapshot(0), f.snapshot(1)];
+    let managed = f.managed_bundle(1, &next);
+    assert!(!managed.exists());
+    rejected(f.serve_checked_offer(1, &f.initial_grant, &hash, &file), "complete retained save bundle");
+    rejected(
+        f.mutate(
+            1,
+            "stage",
+            &f.initial_grant,
+            &[
+                "--offer",
+                path(&file),
+                "--expected-offer",
+                &hash,
+                "--checkpoint",
+                path(&next_bundle.join("manifest.postcard")),
+            ],
+        ),
+        "requires authenticated network handoff",
+    );
+    rejected(
+        f.mutate(0, "commit", &f.initial_grant, &["--receipt", path(&file), "--expected-offer", &hash]),
+        "requires authenticated network handoff",
+    );
+    rejected(
+        f.restore_held(0, &f.initial_grant, &next, &f.temp.path().join("prepared-restore")),
+        "requires exact held",
+    );
+    assert_eq!([f.snapshot(0), f.snapshot(1)], before);
+
+    // Managed fetch accepts no alternate location or source override.
+    rejected(
+        f.fetch_save(
+            1,
+            &f.initial_grant,
+            &hash,
+            &file,
+            Some(&f.temp.path().join("unmanaged")),
+            "127.0.0.1:1".parse().unwrap(),
+        ),
+        "uses only its managed retained bundle",
+    );
+    rejected(
+        f.save_transfer(0, "serve", &f.initial_grant, &hash)
+            .args(["--bundle", path(&next_bundle), "--bind", "127.0.0.1:0"])
+            .output()
+            .unwrap(),
+        "uses only its managed retained bundle",
+    );
+    let (server, address) = f.save_listener(0, &f.initial_grant, &hash, None);
+    let (proxy_address, proxy) = corrupt_save_blob(address);
+    let failure = f.fetch_save(1, &f.initial_grant, &hash, &file, None, proxy_address);
+    assert!(!failure.status.success() && failure.stdout.is_empty());
+    proxy.join().unwrap();
+    assert!(!server.finish().status.success());
+    assert!(!managed.exists());
+    assert_eq!([f.snapshot(0), f.snapshot(1)], before);
+    // Fetch, and then exact retained-data retry; neither operation changes the journal.
+    for _ in 0..2 {
+        let (server, address) = f.save_listener(0, &f.initial_grant, &hash, None);
+        let received = json(f.fetch_save(1, &f.initial_grant, &hash, &file, None, address));
+        success(server.finish());
+        assert_save_flags(&received, "exclusive_turn_save_data_received");
+        assert_eq!(received["path"], serde_json::json!(managed));
+        assert_eq!(received["reference_commitment"], next);
+        assert_eq!([f.snapshot(0), f.snapshot(1)], before);
+    }
+    let blob_name = Hash32::from_domain_bytes(b"swarmcraft/exclusive-turn/save-blob/v1\0", changed_level).to_string();
+    let target_blob = managed.join("blobs").join(&blob_name);
+    let saved = f.temp.path().join("removed-target-blob");
+    fs::rename(&target_blob, &saved).unwrap();
+    rejected(f.serve_checked_offer(1, &f.initial_grant, &hash, &file), "missing blob");
+    assert_eq!([f.snapshot(0), f.snapshot(1)], before);
+    fs::rename(&saved, &target_blob).unwrap();
+
+    // Drop the actual committed release on the encrypted TCP connection.
+    // Source is permanently retired; recipient is staged but not held.
+    let (server, address) = f.serve(1, &f.initial_grant, &hash, &file);
+    let (proxy_address, proxy) = fault_proxy(address, WireFault::LoseRelease);
+    rejected(f.send_handoff(0, &f.initial_grant, &hash, proxy_address), "source relinquished");
+    proxy.join().unwrap();
+    assert!(!server.finish().status.success());
+    let released = f.status(0);
+    report(&released, "released", 2);
+    let grant = released["grant"].as_str().unwrap().to_owned();
+    report(&f.status(1), "replica", 1);
+    assert_eq!(f.status(1)["staged_offer"], hash);
+    let staged = [f.snapshot(0), f.snapshot(1)];
+    rejected(f.restore_held(0, &grant, &next, &f.temp.path().join("released-restore")), "requires exact held");
+    rejected(
+        f.restore_held(1, &f.initial_grant, &initial, &f.temp.path().join("staged-restore")),
+        "requires exact held",
+    );
+    rejected(f.mutate(0, "cancel", &grant, &["--expected-offer", &hash]), "no cancelable");
+    rejected(
+        invoke(&f.profiles[0], &["export-release", "--expected-world", &f.world, "--expected-grant", &grant]),
+        "requires exact authenticated network retry",
+    );
+    // Cold reload with missing staged bytes must fail, even after a valid
+    // receipt was signed. Reinstating exact original bytes is test-only.
+    fs::rename(&target_blob, &saved).unwrap();
+    rejected(invoke(&f.profiles[1], &["status", "--expected-world", &f.world]), "missing blob");
+    rejected(f.serve_checked_offer(1, &f.initial_grant, &hash, &file), "missing blob");
+    assert_eq!([f.snapshot(0), f.snapshot(1)], staged);
+    fs::rename(&saved, &target_blob).unwrap();
+    let (server, address) = f.serve(1, &f.initial_grant, &hash, &file);
+    confirmed(f.send_handoff(0, &f.initial_grant, &hash, address), &f, &offer, &grant, 2, 1);
+    success(server.finish());
+    let held = f.status(1);
+    report(&held, "held", 2);
+    assert_eq!(held["local_save_data_verified"], true);
+    let committed = [f.snapshot(0), f.snapshot(1)];
+    // Recheck the full bytes before an already-accepted retry or restore.
+    fs::write(&target_blob, b"corrupted save blob").unwrap();
+    rejected(f.serve_checked_offer(1, &f.initial_grant, &hash, &file), "digest or length differs");
+    rejected(f.restore_held(1, &grant, &next, &f.temp.path().join("corrupt-held-restore")), "digest or length differs");
+    assert_eq!([f.snapshot(0), f.snapshot(1)], committed);
+    fs::write(&target_blob, changed_level).unwrap();
+    let (server, address) = f.serve(1, &f.initial_grant, &hash, &file);
+    confirmed(f.send_handoff(0, &f.initial_grant, &hash, address), &f, &offer, &grant, 2, 1);
+    success(server.finish());
+    assert_eq!([f.snapshot(0), f.snapshot(1)], committed);
+    let restored = f.temp.path().join("recipient-restored");
+    assert_save_flags(&json(f.restore_held(1, &grant, &next, &restored)), "exclusive_turn_held_save_data_restored");
+    assert_same_save(&source, &restored);
+
+    // Return the same verified content to the original device. The local
+    // blob store already contains it, so fetch must verify and not replace.
+    let (reverse, bytes) = f.prepare(1, &grant, &next);
+    let reverse_hash = reverse.offer_hash().unwrap().to_string();
+    let reverse_file = f.put("save-backed-reverse.json", &bytes);
+    let (server, address) = f.save_listener(1, &grant, &reverse_hash, None);
+    assert_save_flags(
+        &json(f.fetch_save(0, &grant, &reverse_hash, &reverse_file, None, address)),
+        "exclusive_turn_save_data_received",
+    );
+    success(server.finish());
+    let (server, address) = f.serve(0, &grant, &reverse_hash, &reverse_file);
+    let output = f.send_handoff(1, &grant, &reverse_hash, address);
+    success(server.finish());
+    let returned = f.status(0);
+    let final_grant = returned["grant"].as_str().unwrap();
+    confirmed(output, &f, &reverse, final_grant, 3, 0);
+    report(&returned, "held", 3);
+    report(&f.status(1), "released", 3);
+    assert_eq!(returned["local_save_data_verified"], true);
+    assert_eq!(
+        fs::read(f.managed_bundle(0, &initial).join("manifest.postcard")).unwrap(),
+        fs::read(original_bundle.join("manifest.postcard")).unwrap()
+    );
     f.assert_no_live_storage();
 }
 

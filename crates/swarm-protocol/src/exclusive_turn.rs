@@ -7,6 +7,10 @@ use thiserror::Error;
 use crate::{peer_id_from_public_key, Hash32, PeerId, ProtocolError};
 
 pub const EXCLUSIVE_TURN_FORMAT_V1: u16 = 1;
+/// Same record envelope, a distinct genesis-committed policy: all local
+/// checkpoint transitions require the complete independently verified
+/// offline save bundle. Never a live runtime authorization.
+pub const EXCLUSIVE_TURN_SAVE_FORMAT_V2: u16 = 2;
 pub const MAX_EXCLUSIVE_TURN_RELEASES: usize = 128;
 pub const MAX_EXCLUSIVE_TURN_HISTORY_BYTES: usize = 256 * 1024;
 pub const MAX_EXCLUSIVE_TURN_REFERENCE_BYTES: usize = 1024 * 1024;
@@ -113,8 +117,10 @@ pub fn exclusive_turn_reference_commitment(bytes: &[u8]) -> Result<Hash32, Exclu
     Ok(Hash32::from_domain_bytes(REFERENCE_DOMAIN, bytes))
 }
 
-/// Format 1 fixes the roster for life, requires explicit online-overlap
-/// handoff, and has no election, timeout takeover, membership or solo mode.
+/// Both formats fix the roster for life and have no election, timeout
+/// takeover, membership or solo mode. Format 1 is opaque reference state;
+/// format 2 is the save-backed reference policy. The envelope is unchanged,
+/// but the format is part of the signed genesis and cannot be downgraded.
 /// Initial epoch and fence are both 1; the identity binds this exact policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -128,8 +134,12 @@ pub struct ExclusiveTurnGenesisV1 {
 }
 
 impl ExclusiveTurnGenesisV1 {
+    pub fn save_backed(&self) -> bool {
+        self.format_version == EXCLUSIVE_TURN_SAVE_FORMAT_V2
+    }
+
     pub fn validate(&self) -> Result<(), ExclusiveTurnError> {
-        if self.format_version != EXCLUSIVE_TURN_FORMAT_V1
+        if !matches!(self.format_version, EXCLUSIVE_TURN_FORMAT_V1 | EXCLUSIVE_TURN_SAVE_FORMAT_V2)
             || self.creation_nonce == [0; 32]
             || self.compatibility == Hash32::default()
             || self.devices[0].peer_id >= self.devices[1].peer_id

@@ -1,0 +1,508 @@
+Local Linux genesis-committed save-backed reference policy, 26 November 2026
+Baseline 92c3f4bd7d29ce39347ca9c8d4c0397daefca7df
+140 protocol/consensus tests, nine CLI subprocess tests, 210 enabled CLI library tests passed. Three pre-existing delegated cgroup tests excluded.
+Strict all-target/all-feature protocol, consensus and CLI Clippy, formatting, release and workflow checks passed. No hosted CI.
+Scope: synthetic save-tree and real TCP subprocesses. No actual JVM activation or independent physical device qualification.
+Source/artifact SHA-256 pins:
+c4f4c3b47f2ab8cdb45e34cb7e93fc9b09ccc51ddbc583a92076fd4dd1b36b26  crates/swarm-cli/src/exclusive_turn_network.rs
+0cd70dc095ca74434277502d88331c2343b979de3967bb21230a1498ce3f620b  crates/swarm-cli/src/exclusive_turn_reference.rs
+c532c3d9302fccdabe5a28d12381e482e14025cb4b62e5b97899d7c92be85375  crates/swarm-cli/src/exclusive_turn_save.rs
+df0566dfafa65e8d905556f176594be335e0be77f19d8e022f6d263c5b00d89a  crates/swarm-cli/src/exclusive_turn_writer.rs
+89ed81040d8e51e6705bee46ba03924e77c99fc1acbfa51b670746a86af66c7f  crates/swarm-cli/tests/exclusive_turn_reference_cli.rs
+c5d1a8b527ddc371d1e812182557f0bac2ce52821d39e72909309e20bd79488d  crates/swarm-consensus/src/exclusive_turn.rs
+53efa4fd1f4a5df164e4d829e569bba0ad3a699ddb1b1b5e5cb2ab105bd620b2  crates/swarm-consensus/tests/exclusive_turn.rs
+7edb42583edcfa4fa733010131eb2eb08068eeb63ba5a9f1a785961a1bd6f7cb  crates/swarm-protocol/src/exclusive_turn.rs
+d963ba743580b7f3f3f89be280942e7e639652ccda463f3eb3adf59c0a9b167c  target/debug/swarmcraft
+6efa4d9b4b52f57863950df8a9a71a89fe840e8207810f0a3879ed64c2794ede  target/debug/deps/exclusive_turn_reference_cli-6e8a19a91e9591be
+b1a245a0b82f28c131094844a1d762434da73bcf08dc2cd6b2c72ae4c3be3781  target/debug/deps/swarm_cli-8a80662dd624042a
+
+protocol, consensus and CLI integration original full log SHA-256: 22e2dc8b92f8cb8b7ed1f2e3b5363b07a9d6a0fad4e27fd58c79384bd6dce1b4
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 21.76s
+     Running unittests src/root.rs (target/debug/deps/swarm_consensus-0020aab9d7ea4b74)
+
+running 40 tests
+test base::tests::authority_generation_fails_closed_at_counter_exhaustion ... ok
+test base::tests::automatic_crash_election_requires_majority ... ok
+test base::tests::election_uses_latest_complete_state_then_stable_tie_break ... ok
+test base::tests::lease_uses_monotonic_deadline_and_rejects_stale_generation ... ok
+test base::tests::randomized_crash_partition_reconnect_simulation_never_elects_two_authorities ... ok
+test base::tests::same_generation_different_hash_is_a_hard_conflict ... ok
+test base::tests::stale_authority_writes_are_rejected_after_advance ... ok
+test exclusive_turn_model::bounded_partition_crash_and_message_replay_search_has_at_most_one_writer ... ok
+test exclusive_turn_model::handoff_requires_quiescence_exact_receipt_and_irreversible_release ... ok
+test exclusive_turn_model::invalid_generation_world_and_counter_exhaustion_are_denials ... ok
+test exclusive_turn_model::lost_recipient_cannot_be_replaced_by_a_timeout_or_a_stale_save ... ok
+test exclusive_turn_model::reverse_handoff_cannot_reactivate_an_old_committed_grant ... ok
+test hosting_policy_migration::tests::historical_same_id_extension_shape_is_not_activation ... ok
+test hosting_policy_migration::tests::old_authority_client_cannot_bypass_required_v2_session ... ok
+test hosting_policy_migration::tests::old_v1_and_uncommitted_sidecars_never_enable_authority ... ok
+test hosting_policy_migration::tests::only_signed_canonical_majority_shape_is_eligible ... ok
+test hosting_policy_migration::tests::revoked_consent_minorities_partitions_and_recovery_are_denied ... ok
+test hosting_policy_migration::tests::same_identity_is_not_an_admissible_v2_migration ... ok
+test membership::tests::five_to_three_removal_requires_intersecting_majorities ... ok
+test membership::tests::one_to_two_join_can_commit_with_old_authority_and_new_peer ... ok
+test membership::tests::three_to_five_requires_old_and_new_majorities ... ok
+test recovery::tests::higher_round_cannot_switch_canonical_base ... ok
+test recovery::tests::higher_round_preserves_the_previously_accepted_candidate_value ... ok
+test recovery::tests::partitioned_majorities_cannot_form_for_different_rounds_without_intersection_peer_moving_forward ... ok
+test recovery::tests::quorum_certificate_requires_unique_canonical_members ... ok
+test recovery::tests::same_round_cannot_be_promised_to_two_candidates ... ok
+test recovery::tests::stale_candidate_cannot_return_after_higher_round_promise ... ok
+test simulator::tests::all_offline_sleeps_and_latest_replica_wakes ... ok
+test simulator::tests::automatic_crash_recovery_never_falls_back_to_solo ... ok
+test simulator::tests::candidate_crash_after_reservation_is_safe_but_stalls_until_future_round_logic ... ok
+test simulator::tests::conflicting_candidate_cannot_replace_reserved_generation ... ok
+test simulator::tests::deterministic_candidate_prevents_visible_racers_from_choosing_different_winners ... ok
+test simulator::tests::divergent_or_corrupt_replica_cannot_take_over ... ok
+test simulator::tests::epoch_quorum_without_live_lease_quorum_cannot_activate ... ok
+test simulator::tests::partition_and_crash_never_create_two_authorities ... ok
+test simulator::tests::recovery_generation_exhaustion_fails_closed_in_legacy_simulator ... ok
+test simulator::tests::reservation_quorum_alone_does_not_activate_candidate ... ok
+test solo::tests::independently_advanced_solo_branches_are_explicit_conflict ... ok
+test solo::tests::no_silent_merge_when_branches_have_unrelated_bases ... ok
+test solo::tests::returning_replica_at_solo_base_adopts_solo_head ... ok
+
+test result: ok. 40 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s
+
+     Running tests/chaos.rs (target/debug/deps/chaos-c827d165a9c9fe4d)
+
+running 1 test
+test randomized_crash_partition_restart_and_delay_never_split_brains ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+
+     Running tests/exclusive_turn.rs (target/debug/deps/exclusive_turn-ddc90937e061b613)
+
+running 6 tests
+test alternating_releases_bind_checkpoint_and_independent_attempt_floors ... ok
+test every_handoff_binding_and_role_is_verified_before_release_acceptance ... ok
+test exact_prefix_reconciliation_rejects_valid_conflicts_and_rollback ... ok
+test fixed_policy_creation_requires_two_distinct_canonical_keys_and_exact_approvals ... ok
+test history_and_attempt_exhaustion_never_wrap_or_reopen_an_old_grant ... ok
+test save_policy_is_committed_to_world_identity_and_survives_release_history ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.22s
+
+     Running tests/failover_soak.rs (target/debug/deps/failover_soak-2e8594a4f8ed8574)
+
+running 1 test
+test one_thousand_forced_crashes_preserve_single_authority_and_monotonic_fencing ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/migration.rs (target/debug/deps/migration-4f1634c79191a043)
+
+running 6 tests
+test candidate_must_hold_exact_complete_snapshot ... ok
+test crash_takeover_waits_for_monotonic_lease_and_requires_quorum ... ok
+test legacy_generation_counter_exhaustion_fails_closed ... ok
+test manual_transfer_requires_target_snapshot_before_commit ... ok
+test quorum_takeover_can_start_immediately_after_expiry ... ok
+test sleeping_world_wakes_only_from_latest_snapshot ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/ownerless_authority.rs (target/debug/deps/ownerless_authority-a9979e5901bb8647)
+
+running 7 tests
+test bounded_rosters_and_checkpoint_documents_fail_closed ... ok
+test joint_majorities_and_every_new_validator_are_required ... ok
+test ownerless_observation_removed_member_cannot_attest_under_new_roster ... ok
+test ownerless_observation_threshold_and_nonce_are_not_governance_votes ... ok
+test surviving_majority_advances_and_recovers_exact_checkpoint_without_founder ... ok
+test tampering_and_signature_replay_are_rejected_even_with_a_majority ... ok
+test witness_subsets_are_interchangeable_but_conflicting_accepted_ancestry_is_not ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.83s
+
+     Running tests/ownerless_creation.rs (target/debug/deps/ownerless_creation-190959ebf206e149)
+
+running 7 tests
+test all_three_approvals_bind_immutable_no_op_creation ... ok
+test bounded_canonical_roster_and_weak_keys_refused ... ok
+test founder_or_majority_alone_cannot_create_and_signatures_cannot_be_amplified ... ok
+test genesis_pins_prevent_replay_and_roster_substitution ... ok
+test mixed_torsion_alias_is_not_an_extra_validator ... ok
+test outsider_has_no_vote_and_creation_is_distinct_from_maintenance ... ok
+test rules_are_fixed_even_if_all_keys_would_sign ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.03s
+
+     Running tests/ownerless_participation.rs (target/debug/deps/ownerless_participation-4cb39b8743fdc1a8)
+
+running 4 tests
+test private_invitation_is_independent_even_for_validators_and_eligible_workers ... ok
+test public_genesis_is_explicit_distinct_and_preserves_private_policy_hash ... ok
+test public_play_is_not_worker_eligibility_or_governance ... ok
+test signed_request_response_and_context_pins_refuse_tampering_and_role_replay ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.49s
+
+     Running tests/preview_acceptance.rs (target/debug/deps/preview_acceptance-ce6f6e1e4364921e)
+
+running 1 test
+test preview_three_peer_failover_sleep_and_wake_flow ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/solo_history_acceptance.rs (target/debug/deps/solo_history_acceptance-db2b6f3fd91e5248)
+
+running 2 tests
+test competing_solo_histories_are_detected_instead_of_merged ... ok
+test returning_replica_accepts_compatible_solo_history ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/v2_cutover_plan_model.rs (target/debug/deps/v2_cutover_plan_model-0697f95d94ef8c1d)
+
+running 3 tests
+test accepted_cutover_cannot_be_retargeted_or_rolled_back ... ok
+test joint_majorities_intersect_and_reject_competing_cutover ... ok
+test restart_at_each_planned_boundary_never_publishes_unaccepted_target ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/root.rs (target/debug/deps/swarm_protocol-9f72e83a7d17591c)
+
+running 29 tests
+test base::listing_metadata::tests::creation_metadata_is_explicit_coarse_and_signed_field_compatible ... ok
+test base::tests::descriptor_normalization_is_deterministic ... ok
+test base::tests::state_root_changes_with_path_or_content_hash ... ok
+test base::tests::world_id_is_deterministic_and_prefixed ... ok
+test canonical_modpack::agent5_supply_chain_tests::md5_only_provider_download_is_not_a_valid_reacquisition_contract ... ok
+test canonical_modpack::tests::ambiguous_runtime_versions_are_rejected ... ok
+test canonical_modpack::tests::artifact_change_changes_existing_authoritative_fingerprint ... ok
+test canonical_modpack::tests::canonical_order_and_fingerprint_ignore_provider_response_order ... ok
+test canonical_modpack::tests::deployment_rejects_side_incomplete_dependencies_and_overlapping_ids ... ok
+test canonical_modpack::tests::direct_transitive_duplicate_and_cycle_safe_required_dependencies_validate ... ok
+test canonical_modpack::tests::exact_manual_artifact_is_canonical_after_bytes_are_known ... ok
+test canonical_modpack::tests::missing_and_incompatible_required_dependencies_fail_closed ... ok
+test canonical_modpack::tests::modrinth_and_curseforge_provenance_round_trip_without_collapsing ... ok
+test canonical_modpack::tests::runtime_hash_matches_existing_server_mod_domain_contract ... ok
+test discovery::tests::freshness_vote_signing_bytes_are_deterministic_across_round_trip ... ok
+test discovery::tests::private_visibility_is_not_discoverable ... ok
+test discovery::tests::tag_order_does_not_change_announcement_signing_bytes ... ok
+test exclusive_turn::tests::bounded_canonical_history_codec_never_implies_signature_verification ... ok
+test runtime_support::tests::accepts_only_bridge_compatible_runtime_tuples ... ok
+test runtime_support::tests::qualification_is_exact_and_does_not_relabel_declared_ranges_as_tested ... ok
+test runtime_support::tests::shipped_contract_matches_fabric_metadata ... ok
+test semantics::tests::membership_requires_canonical_order_and_uniqueness ... ok
+test semantics::tests::provider_hint_cannot_disambiguate_duplicate_runtime_identity ... ok
+test semantics::tests::snapshot_requires_canonical_path_order ... ok
+test semantics::tests::unsupported_versions_fail_closed_per_record_family ... ok
+test v2::tests::compatibility_fingerprint_changes_when_exact_artifact_changes ... ok
+test v2::tests::compatibility_fingerprint_is_order_independent_after_canonical_normalization ... ok
+test v2::tests::presentation_tag_order_does_not_change_config_hash ... ok
+test v2::tests::recovery_ballot_binds_candidate_round_and_canonical_base ... ok
+
+test result: ok. 29 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/canonical_semantics.rs (target/debug/deps/canonical_semantics-67a37f655e45146a)
+
+running 5 tests
+test canonical_runtime_permutations_have_one_fingerprint ... ok
+test duplicate_runtime_identity_is_rejected_even_when_provider_hint_differs ... ok
+test exact_duplicate_runtime_identity_is_rejected_instead_of_silently_deduplicated ... ok
+test genesis_initial_membership_requires_canonical_order_and_uniqueness ... ok
+test provider_hint_is_canonical_signed_compatibility_material ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/hosting_contribution_policy.rs (target/debug/deps/hosting_contribution_policy-77d36a5a28efb412)
+
+running 16 tests
+test challenge_bound_host_claim_is_not_a_legacy_hello_or_authority_token ... ok
+test compatibility_runtime_replication_and_quorum_are_separate_gates ... ok
+test consent_is_per_world_per_peer_local_and_monotonically_revocable ... ok
+test forged_or_malformed_policy_never_promotes_a_peer ... ok
+test heap_policy_and_local_ceiling_both_limit_contributions ... ok
+test host_claim_cannot_reuse_challenge_after_consent_or_heap_changes ... ok
+test host_claim_expiration_replay_and_malformed_signed_data_fail_closed ... ok
+test host_claim_must_bind_challenge_policy_head_peer_and_epoch ... ok
+test invalid_and_unknown_policy_formats_fail_closed ... ok
+test joining_and_membership_never_imply_hosting_consent ... ok
+test new_records_roundtrip_and_have_distinct_canonical_domains ... ok
+test old_or_missing_policy_never_automatically_authorizes_contribution ... ok
+test old_signed_world_config_bytes_and_identity_stay_unmodified ... ok
+test policy_history_requires_strict_hash_link_and_monotonic_sequence ... ok
+test signature_and_config_binding_are_mandatory ... ok
+test signed_host_claim_is_single_use_even_before_expiration ... ok
+
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/hosting_realm_v2_contract.rs (target/debug/deps/hosting_realm_v2_contract-5ade2cd02b6969ab)
+
+running 12 tests
+test distinct_v2_realm_preserves_source_v1_genesis_and_config_bytes ... ok
+test invalid_source_anchor_and_unsupported_version_reject_without_v1_mutation ... ok
+test migration_proposal_is_signed_but_does_not_grant_canonical_authority ... ok
+test migration_proposal_must_bind_source_authority_target_policy_and_fence ... ok
+test signed_v2_authority_actions_reject_v1_downgrade_and_stale_context ... ok
+test signed_v2_migration_quorum_rejects_banned_voters_and_unbounded_envelopes ... ok
+test signed_v2_migration_quorum_rejects_missing_or_forged_source_membership ... ok
+test signed_v2_migration_quorum_requires_unique_authenticated_majority ... ok
+test target_policy_is_not_a_v1_sidecar_and_history_cannot_fork_silently ... ok
+test v2_migration_votes_are_bound_to_source_membership_and_proposal ... ok
+test v2_postcard_decode_rejects_oversized_and_missing_signature_bytes ... ok
+test verifier_owned_expectations_cannot_be_replaced_by_claimed_values ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+   Doc-tests swarm_consensus
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests swarm_protocol
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2m 37s
+     Running tests/exclusive_turn_reference_cli.rs (target/debug/deps/exclusive_turn_reference_cli-6e8a19a91e9591be)
+
+running 9 tests
+test authenticated_save_blob_transfer_is_exact_and_never_releases_a_turn ... ok
+test concurrent_cancel_and_commit_cannot_both_succeed ... ok
+test encrypted_handoff_partition_boundaries_and_exact_outbox_retry ... ok
+test offline_save_exact_capture_restore_and_corruption_refusals ... ok
+test private_lock_corruption_and_missing_staged_bytes_refuse_without_reinitializing ... ok
+test real_process_round_trip_cancellation_stale_receipts_and_lost_commit_output ... ok
+test real_writer_lock_route_and_crash_fence_survive_network_handoff ... ok
+test save_backed_release_requires_full_retention_before_and_after_commit ... ok
+test writer_lost_ack_keeps_exact_durable_checkpoint_and_rejects_stale_cas ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 52.61s
+
+
+strict Clippy original full log SHA-256: 1a9ddb5b2a05b21e749cdb3c35ce880008e82fd182ee41cd86139c1c17ab51ab
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 13s
+
+CLI library original full log SHA-256: 05d05ea7fa648827b00b759814434d2a2c526ecc8b2fea99336c30761c0e8717
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 29.02s
+     Running unittests src/lib.rs (target/debug/deps/swarm_cli-8a80662dd624042a)
+
+running 213 tests
+test authority_permit::tests::changing_exact_generation_becomes_live_then_expires ... ok
+test authority_permit::tests::concurrent_publishers_serialize_heartbeat_updates ... ok
+test authority_permit::tests::concurrent_reads_never_observe_a_torn_published_permit ... ok
+test authority_permit::tests::corrupt_or_exhausted_heartbeat_floor_never_resets_to_a_fresh_permit ... ok
+test authority_permit::tests::daemon_restart_resumes_heartbeat_above_persistent_floor_after_clearing_visible_permit ... ok
+test authority_permit::tests::different_generation_is_ignored ... ok
+test authority_permit::tests::frozen_permit_never_becomes_live ... ok
+test authority_permit::tests::rolled_back_heartbeat_never_renews_a_fresh_lease ... ok
+test authority_permit::tests::stale_generation_cannot_publish_after_newer_floor_even_when_permit_is_removed ... ok
+test authority_permit::tests::symlinked_permit_cannot_be_observed_or_cleared_through_the_link ... ok
+test authority_permit::tests::unreadable_or_malformed_permit_retires_cached_freshness ... ok
+test authority_permit::tests::unsafe_existing_permit_symlink_fails_closed ... ok
+test authority_permit::tests::unsafe_world_control_directory_fails_closed ... ok
+test authority_permit::tests::writable_or_linked_control_paths_never_prove_fresh_authority ... ok
+test checkpoint_backup::tests::authenticated_metadata_length_is_bounded_before_record_allocation ... ok
+test checkpoint_backup::tests::file_publication_never_replaces_a_racing_destination ... ok
+test checkpoint_backup::tests::frame_authentication_rejects_reordering_splicing_length_changes_and_missing_end ... ok
+test checkpoint_backup::tests::key_holder_cannot_substitute_unsigned_history_or_corrupted_signed_payload ... ok
+test client_profile::tests::includes_client_and_both_without_server_only_or_datapacks ... ok
+test client_profile::tests::inventory_is_explicit_and_reports_missing_invalid_and_ignores_account_files ... ok
+test client_profile::tests::rejects_conflicting_signed_requirements ... ok
+test directory_moderation::tests::concurrent_hide_and_suppression_preserve_both ... ok
+test directory_moderation::tests::independent_durable_policy_controls_and_no_canonical_state ... ok
+test directory_moderation::tests::malformed_policy_fails_closed_and_cannot_be_overwritten ... ok
+test directory_moderation::tests::report_envelope_rejects_tampered_categories_and_unexpected_data ... ok
+test directory_moderation::tests::symbolic_policy_paths_are_refused ... ok
+test discovery::recovery_freshness_fail_closed_tests::dangling_promise_symlink_cannot_prove_discovery_freshness ... ok
+test discovery::recovery_freshness_fail_closed_tests::unreadable_promise_cannot_prove_discovery_freshness ... ok
+test discovery::tests::banned_or_removed_friend_is_not_reported_as_shared_world ... ok
+test discovery::tests::concurrent_contact_mutations_preserve_other_entries ... ok
+test discovery::tests::contact_removal_and_readdition_never_restore_old_consent_or_revision ... ok
+test discovery::tests::discovery_counter_exhaustion_fails_closed ... ok
+test discovery::tests::discovery_retry_fault_injection_rejects_duplicate_wrong_peer_and_dht_failures ... ok
+test discovery::tests::duplicate_consent_and_invalid_friend_store_fail_closed ... ok
+test discovery::tests::durable_recovery_promise_fences_stale_freshness_and_current_majority_recovers ... ok
+test discovery::tests::friend_store_is_cryptographic_and_label_collisions_are_harmless ... ok
+test discovery::tests::legacy_contacts_migrate_hidden_and_require_two_explicit_grants ... ok
+test discovery::tests::private_and_unlisted_worlds_never_match_public_browse ... ok
+test discovery::tests::removed_contact_cannot_be_probed_and_does_not_remove_same_label_contact ... ok
+test discovery::tests::transient_public_provider_retry_budget_is_bounded ... ok
+test game_route_api::tests::endpoint_never_reuses_status_or_claims_proof_without_daemon_reply ... ok
+test game_route_api::tests::unverified_status_never_leaks_a_route_or_authority_generation ... ok
+test historical_authority::tests::crash_retirement_fences_old_authority_and_resumes_certified_suffix ... ok
+test historical_authority::tests::forged_successor_signature_fails_closed ... ok
+test historical_authority::tests::missing_predecessor_and_skipped_fence_fail_closed ... ok
+test historical_authority::tests::replay_proof_requires_exact_signed_transfer_and_recovery_quorum ... ok
+test historical_authority::tests::replay_proof_requires_exact_solo_member_sleep_boundary_for_wake ... ok
+test historical_authority::tests::signed_config_chain_survives_authority_change_and_rejects_corrupt_history ... ok
+test historical_authority::tests::signed_history_walks_exact_records_without_granting_authority ... ok
+test historical_authority::tests::v1_role_projection_keeps_nonhosting_voters_and_durable_joint_promises ... ok
+test historical_authority::tests::v2_migration_review_uses_real_canonical_storage_and_never_activates ... ok
+test host_memory_cap::linux::tests::cpu_quota_parser_is_fractional_and_rejects_malformed_values ... ok
+test host_memory_cap::linux::tests::ordinary_directory_and_root_cgroup_are_not_delegated_hosting_roots ... ok
+test host_memory_cap::linux::tests::real_cgroup_enforces_native_and_descendant_memory_before_exec ... ignored, requires a disposable delegated cgroup-v2 test scope
+test host_memory_cap::linux::tests::real_cpu_cap_applies_to_child_and_descendant_and_detects_policy_change ... ignored, requires disposable delegated cgroup-v2 CPU and memory scope
+test host_memory_cap::linux::tests::residual_descendant_fences_runtime_reset_after_java_exit ... ignored, requires a disposable delegated cgroup-v2 test scope
+test host_memory_cap::tests::whole_process_limit_preserves_java_native_reserve ... ok
+test host_readiness::tests::checkpoint_diagnostics_bind_the_exact_manifest_and_logical_size ... ok
+test host_readiness::tests::conflicting_history_is_never_green ... ok
+test host_readiness::tests::healthy_successor_is_safe_only_with_surviving_quorum ... ok
+test host_readiness::tests::incompatible_runtime_blocks_shutdown ... ok
+test host_readiness::tests::missing_mods_block_shutdown ... ok
+test host_readiness::tests::offline_successor_means_world_will_stop ... ok
+test host_readiness::tests::only_member_means_world_will_stop ... ok
+test host_readiness::tests::recovery_quorum_is_measured_without_the_current_authority ... ok
+test host_readiness::tests::runtime_proof_detects_changed_artifacts_and_reconfiguration ... ok
+test host_readiness::tests::sleep_boundary_requires_current_generation_checkpoint_and_eligible_authority ... ok
+test host_readiness::tests::solo_authority_is_degraded_not_green ... ok
+test host_readiness::tests::stale_replica_is_syncing ... ok
+test host_readiness::tests::two_member_successor_requires_explicit_handoff ... ok
+test hosting_budget::tests::ancestor_memory_pressure_is_not_ignored_when_leaf_is_unlimited ... ok
+test hosting_budget::tests::cgroup_v2_opaque_or_inaccessible_mount_never_authorizes_host_memory ... ok
+test hosting_budget::tests::concurrent_host_admission_is_serialized ... ok
+test hosting_budget::tests::consent_is_scoped_to_the_current_peer_identity ... ok
+test hosting_budget::tests::defaults_to_player_only_and_revocation_persists ... ok
+test hosting_budget::tests::every_withdrawal_invalidates_cached_runtime_and_host_readiness ... ok
+test hosting_budget::tests::exhausted_consent_revision_never_wraps_or_reuses_previous_authority ... ok
+test hosting_budget::tests::explicit_cpu_preference_is_revision_bound_and_legacy_heap_update_cannot_widen_it ... ok
+test hosting_budget::tests::malformed_record_never_becomes_consent ... ok
+test hosting_budget::tests::nested_cgroup_limits_override_large_host_ram ... ok
+test hosting_budget::tests::non_root_missing_memory_max_does_not_fall_back_to_root_capacity ... ok
+test hosting_budget::tests::opt_out_invalidates_an_active_admission_generation ... ok
+test hosting_budget::tests::overflow_and_unknown_memory_fail_closed ... ok
+test hosting_budget::tests::readiness_revision_is_atomic_with_consent_and_json_safe ... ok
+test hosting_budget::tests::real_root_cgroup_without_memory_max_preserves_host_memory_probe ... ok
+test hosting_budget::tests::replica_only_profile_denies_hosting_without_changing_old_consent ... ok
+test hosting_budget::tests::replica_only_profile_rejects_active_or_ambiguous_runtime_ownership ... ok
+test hosting_budget::tests::revoked_consent_cannot_persist_a_transfer_or_wake_intent ... ok
+test hosting_budget::tests::revoked_then_reauthorized_consent_cannot_reuse_stale_epoch_admission ... ok
+test hosting_budget::tests::throttled_cgroup_rejects_hosting_even_when_hard_limit_is_unbounded ... ok
+test hosting_budget::tests::unreadable_or_invalid_nested_cgroup_never_falls_back_to_host_ram ... ok
+test hosting_budget::tests::zero_is_not_a_host_budget ... ok
+test launch_guard::tests::corrupt_sleep_record_is_not_treated_as_awake ... ok
+test launch_guard::tests::missing_sleep_record_is_the_only_awake_classification ... ok
+test launch_guard::tests::sleeping_multi_member_world_cannot_self_elect_by_direct_launch ... ok
+test launch_guard::tests::sleeping_solo_world_can_use_direct_launch ... ok
+test live_authority::tests::canonical_route_requires_signed_majority_and_current_host_consent ... ok
+test live_authority::tests::genesis_membership_requires_real_signatures_and_bound_keys ... ok
+test live_authority::tests::immutable_signature_memoization_requires_every_exact_byte_and_bounds_memory ... ok
+test live_authority::tests::immutable_signature_poisoned_cache_falls_back_to_cryptography ... ok
+test live_authority::tests::missing_live_provider_can_never_authorize_game_streams ... ok
+test live_authority::tests::monotonic_deadline_includes_all_proof_verification_work ... ok
+test live_authority::tests::private_world_signed_votes_require_intersecting_live_majority ... ok
+test live_authority::tests::signed_fabric_attestation_binds_consent_world_nonce_and_port ... ok
+test live_authority::tests::signed_membership_certificates_require_unique_voters_and_bounded_history ... ok
+test live_fabric_readiness::tests::live_nonce_and_exact_world_are_required ... ok
+test live_fabric_readiness::tests::malformed_and_unauthenticated_shapes_cannot_count_as_ready ... ok
+test live_fabric_readiness::tests::stable_instance_hash_is_not_a_reusable_challenge_response ... ok
+test live_runtime_registry::tests::challenge_request_ids_never_wrap_or_repeat ... ok
+test live_runtime_registry::tests::multiple_live_worlds_never_select_an_ambiguous_game_destination ... ok
+test live_runtime_registry::tests::nonexistent_and_zero_nonce_challenges_fail_closed ... ok
+test live_runtime_registry::tests::stale_registration_and_missing_runtime_reply_refuse ... ok
+test migration::managed_server_properties::linux_listener::tests::actual_kernel_listener_requires_exact_address_and_ownership ... ok
+test migration::managed_server_properties::linux_listener::tests::exact_ipv4_and_mapped_ipv6_are_private_but_wildcards_are_not ... ok
+test migration::managed_server_properties::linux_listener::tests::supervised_child_must_own_the_loopback_socket_not_just_answer_tcp ... ok
+test migration::managed_server_properties::tests::malformed_registry_does_not_get_reset_to_allocate_a_new_port ... ok
+test migration::managed_server_properties::tests::no_existing_properties_file_is_ever_truncated ... ok
+test migration::managed_server_properties::tests::saved_busy_port_is_refused_not_silently_reassigned ... ok
+test migration::managed_server_properties::tests::two_worlds_with_same_initial_slot_get_unique_durable_loopback_ports ... ok
+test migration::runtime_archive::tests::archive_resumes_after_rename_and_receipt_interruption_without_second_copy ... ok
+test migration::runtime_archive::tests::kernel_rename_never_replaces_an_existing_archive_directory ... ok
+test migration::runtime_archive::tests::unsafe_links_and_conflicting_runtime_paths_keep_pending_marker ... ok
+test migration::runtime_retirement_tests::checkpointing_or_withdrawal_clears_stale_ready_and_route ... ok
+test migration::runtime_retirement_tests::concurrent_status_writes_never_publish_truncated_json ... ok
+test migration::runtime_retirement_tests::disarmed_startup_guard_does_not_kill_a_supervised_java_process ... ok
+test migration::runtime_retirement_tests::failed_startup_guard_reaps_java_and_invalidates_both_readiness_proofs ... ok
+test migration::runtime_retirement_tests::mismatched_world_status_cannot_retain_a_runtime_verification ... ok
+test migration::runtime_retirement_tests::safe_stop_intent_must_match_exact_world_epoch_fence_and_authority ... ok
+test migration::runtime_retirement_tests::symlinked_stop_intent_does_not_request_a_checkpoint ... ok
+test migration::runtime_retirement_tests::symlinked_transfer_intent_cannot_trigger_checkpoint ... ok
+test migration::runtime_retirement_tests::transfer_intent_requires_exact_world_generation_fence_and_authority ... ok
+test package_provider::modrinth::agent5_http_security_tests::modrinth_metadata_shape_and_portable_filename_are_bounded ... ok
+test package_provider::modrinth::agent5_http_security_tests::modrinth_urls_and_redirects_stay_on_exact_origins ... ok
+test provider_runtime::agent5_runtime_http_security_tests::curseforge_runtime_origins_reject_second_origin_and_private_targets ... ok
+test provider_runtime::agent5_runtime_http_security_tests::runtime_api_key_rejects_header_injection ... ok
+test provider_runtime::agent5_runtime_http_security_tests::runtime_metadata_and_filename_limits_fail_closed ... ok
+test provider_runtime::tests::curseforge_exact_identity_and_provider_metadata_must_match ... ok
+test provider_runtime::tests::md5_only_provider_identity_requires_manual_runtime_remediation ... ok
+test provider_runtime::tests::pristine_target_acquires_both_providers_retains_partial_progress_and_requires_manual_bytes ... ok
+test provider_runtime::tests::restricted_corrupt_substituted_or_stale_artifacts_never_publish ... ok
+test provider_runtime::tests::strong_canonical_hash_verification_rejects_wrong_bytes ... ok
+test replica_cache::tests::bounded_shared_budget_does_not_accumulate_credit_or_reset_on_policy_change ... ok
+test replica_cache::tests::hot_preference_is_bounded_and_never_served_is_first ... ok
+test replica_cache::tests::utc_parse_is_strict ... ok
+test replication_pacing::tests::invalid_budgets_are_rejected_and_never_disable_replication ... ok
+test replication_pacing::tests::play_mode_caps_aggregate_burst_and_idle_restores_normal_chunk ... ok
+test replication_pacing::tests::slow_feedback_reduces_rate_but_not_progress_and_fast_feedback_recovers ... ok
+test runtime_installer::tests::atomic_local_install_is_retry_safe ... ok
+test runtime_installer::tests::cache_corruption_refuses_reuse_and_repair_keeps_old_generation ... ok
+test runtime_installer::tests::cache_outage_failed_refresh_and_new_generation_preserve_old_paths ... ok
+test runtime_installer::tests::extracts_fabric_api_versions_without_xml_dependency ... ok
+test runtime_installer::tests::install_lock_rejects_concurrent_writer_and_cleans_up ... ok
+test runtime_installer::tests::java_generation_hashes_complete_tree_and_preserves_previous_runtime ... ok
+test runtime_installer::tests::java_heuristic_covers_current_profiles ... ok
+test runtime_installer::tests::local_artifact_hash_mismatch_is_rejected_and_temp_is_cleaned ... ok
+test runtime_installer::tests::parses_java_versions ... ok
+test runtime_installer::tests::preview_resolves_only_its_own_commit_snapshot ... ok
+test runtime_installer::tests::rejects_untrusted_or_plain_http_sources ... ok
+test runtime_installer::tests::shared_publication_lock_retains_same_inode_across_worlds ... ok
+test runtime_installer::tests::source_validation_rejects_unexpected_hosts_credentials_and_release_substitution ... ok
+test runtime_installer::tests::unpinned_generated_launcher_never_adopts_unreceipted_cache_or_error_page ... ok
+test runtime_installer::tests::versioned_release_candidates_keep_legacy_fallback ... ok
+test runtime_process_guard::linux_process::tests::process_stat_parser_accepts_parentheses_spaces_and_newlines_in_comm ... ok
+test runtime_process_guard::tests::account_reservation_blocks_second_data_root_after_controller_hard_kill ... ok
+test runtime_process_guard::tests::account_reservation_crash_worker ... ok
+test runtime_process_guard::tests::ambiguous_or_corrupt_or_symlinked_process_records_fail_closed ... ok
+test runtime_process_guard::tests::ambiguous_pending_record_fails_closed ... ok
+test runtime_process_guard::tests::birth_identity_distinguishes_pid_reuse_and_namespace_ambiguity ... ok
+test runtime_process_guard::tests::clean_unspawned_guard_removes_pending_record ... ok
+test runtime_process_guard::tests::current_process_record_blocks_runtime_reset ... ok
+test runtime_process_guard::tests::interrupted_pending_reservation_is_not_repaired_by_switching_roots ... ok
+test runtime_process_guard::tests::live_orphan_in_another_world_blocks_new_jvm_admission ... ok
+test runtime_process_guard::tests::pending_launch_requires_same_boot_investigation_but_reboot_proves_absence ... ok
+test server_mods::tests::concurrent_publication_is_idempotent_and_never_replaces_other_bytes ... ok
+test server_mods::tests::duplicate_mod_id_and_conflicting_versions_are_reported ... ok
+test server_mods::tests::exact_peer_inventory_is_compatible ... ok
+test server_mods::tests::hash_mismatch_is_reported ... ok
+test server_mods::tests::managed_runtime_components_do_not_require_user_mod_files ... ok
+test server_mods::tests::missing_required_mod_blocks_peer_runtime_compatibility ... ok
+test server_mods::tests::parses_deflated_fabric_metadata ... ok
+test server_mods::tests::rejects_invalid_jar ... ok
+test server_mods::tests::server_only_and_unknown_environments_are_classified ... ok
+test server_mods::tests::single_wrong_version_is_reported ... ok
+test server_mods::tests::valid_fabric_mod_jar_is_identified_and_hashed ... ok
+test support_metrics::tests::bounded_retention_summary_and_revision_barrier ... ok
+test support_metrics::tests::disabled_report_and_measurement_do_not_initialize_a_profile ... ok
+test support_metrics::tests::malformed_busy_and_incompatible_stores_cannot_change_operation_result ... ok
+test support_metrics::tests::route_projection_is_expiry_bound_and_never_copies_gateway_or_identifiers ... ok
+test support_metrics::tests::typed_report_excludes_raw_control_records_and_drops_stale_or_mismatched_world_cache ... ok
+test support_metrics::tests::unsafe_symlinked_store_and_control_file_are_refused ... ok
+test updates::tests::manifest_and_package_use_distinct_domains_and_pins ... ok
+test updates::tests::online_allowlist_rejects_credentials_http_ports_and_other_repositories ... ok
+test updates::tests::raw_metadata_has_strict_fields_and_bounded_input ... ok
+test updates::tests::replay_record_blocks_sequence_equivocation_version_rollback_and_clock_regression ... ok
+test updates::tests::signed_but_incompatible_metadata_is_rejected ... ok
+test updates::tests::signed_inventory_rejects_unsupported_paths_duplicates_targets_and_sizes ... ok
+test updates::tests::verifies_actual_byte_stream_and_rejects_truncation_extra_and_corruption ... ok
+test world_import::tests::adapter_range_is_not_a_new_world_qualification ... ok
+test world_import::tests::import_never_creates_storage_inside_the_source_save ... ok
+test world_import::tests::import_refuses_source_while_minecraft_session_lock_is_held ...
+running 1 test
+test world_import::tests::minecraft_session_lock_helper_process ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 212 filtered out; finished in 0.01s
+
+ok
+test world_import::tests::import_requires_explicit_server_mod_compatibility_statement ... ok
+test world_import::tests::importing_same_source_twice_never_overwrites_first_world ... ok
+test world_import::tests::interrupted_import_never_exposes_half_world_and_retry_succeeds ... ok
+test world_import::tests::invalid_directory_and_unknown_compatibility_are_rejected ... ok
+test world_import::tests::minecraft_session_lock_helper_process ... ok
+test world_import::tests::preflight_blocks_unsupported_runtime_missing_mods_and_missing_lock ... ok
+test world_import::tests::preflight_rejects_symlinks_and_reviewed_commit_rechecks_source ... ok
+test world_import::tests::preview_checks_source_and_declared_runtime_without_writing ... ok
+test world_import::tests::publication_failure_injection_leaves_no_visible_world ... ok
+test world_import::tests::recovery_copy_preserves_exact_bytes_and_starts_a_separate_private_identity ... ok
+test world_import::tests::recovery_copy_refuses_corrupt_source_without_publishing_a_world ... ok
+test world_import::tests::unsupported_bridge_tuple_is_rejected_before_publication ... ok
+test world_import::tests::valid_import_is_atomic_restart_safe_and_leaves_source_unchanged ... ok
+
+test result: ok. 210 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out; finished in 28.09s

@@ -268,6 +268,11 @@ impl View {
                 );
             }
         }
+        if self.base.save_backed() {
+            // Refuse before advertising readiness, and again after
+            // reacquiring the lock. Stage/accept reverify independently.
+            super::save::verify_offer_bundle(&self.store, offer)?;
+        }
         Ok(())
     }
 }
@@ -343,7 +348,7 @@ fn handoff(paths: &DataPaths, review: &Review, peer: &str) -> Result<()> {
     let local = view.local();
     let key = remote_key(&view.base, recipient, local)?;
     let offer = view.source_offer(review, recipient)?;
-    let bytes = view.store.state(offer.offer.checkpoint)?;
+    let bytes = view.store.verify_checkpoint(&view.head, offer.offer.checkpoint)?;
     let context = ChannelContext::new(review, local, recipient);
     let deadline = Instant::now() + SESSION_WINDOW;
     let stream = TcpStream::connect_timeout(&address, remaining(deadline)?)?;

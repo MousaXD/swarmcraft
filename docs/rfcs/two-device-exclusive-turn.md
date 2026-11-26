@@ -510,3 +510,131 @@ portable aliases, symlinks/hardlinks, exact restoration, corrupt and
 extra blobs, noncanonical manifests, destination no-clobber, encrypted
 blob corruption and retry, and byte-identical source and recipient
 journals before/after transfer. [Retained output and source/artifact pins](../../research/exclusive-turn/evidence/2026-11-26-offline-save-transfer.txt).
+
+### Genesis-committed save-backed reference policy (format 2)
+
+The existing format-1 opaque reference policy is unchanged. A new
+format-2 genesis commits to the save-backed policy using the same
+canonical record envelope and separate world identity. Both devices
+must independently approve the exact new identity; changing the format
+changes the identity, initial grant and approval signing inputs.
+No in-place upgrade, downgrade or migration from an existing opaque
+reference world is permitted. The verified history retains this policy
+through every release. Older binaries reject the new format. The
+cryptographic verifier alone still proves signed history, not possession
+of any file or runtime authority.
+
+Creation now has explicit save-backed commands:
+
+```sh
+swarmcraft exclusive-turn save draft \
+  --device-key "$A_KEY" --device-key "$B_KEY" \
+  --initial-holder "$A_PEER" --bundle "$VERIFIED_INITIAL_BUNDLE"
+
+# Run independently on each fixed device, with the reviewed genesis pin.
+swarmcraft --data-dir "$PROFILE" exclusive-turn save approve \
+  --draft "$DRAFT" --expected-world "$WORLD" \
+  --bundle "$VERIFIED_INITIAL_BUNDLE" --confirm
+
+# The ordinary assemble command still verifies both exact approvals.
+swarmcraft exclusive-turn assemble --draft "$DRAFT" \
+  --expected-world "$WORLD" --approval "$A_APPROVAL" --approval "$B_APPROVAL"
+
+swarmcraft --data-dir "$PROFILE" exclusive-turn save init \
+  --expected-world "$WORLD" --expected-grant "$INITIAL_GRANT" \
+  --history "$HISTORY" --bundle "$VERIFIED_INITIAL_BUNDLE" --confirm
+```
+
+The draft, each approval and each initialization independently rederive
+all three checkpoint digests and verify every blob. Initialization copies
+the complete bundle into the local private journal directory under
+`save-bundles/<reference commitment>/`, with atomic no-replace publication
+and parent synchronization. Only then is the initial signed journal
+published. The format-1 approve/init commands refuse format 2; signature
+inspection explicitly distinguishes the signed policy from local data
+verification. Current and staged bundles are fully verified from disk
+on every cold journal load and before durable journal publication.
+The managed store is bounded to 16 retained bundle entries per world
+(including unpublished crash scratch), each subject to the preceding
+size/disk limits. It has no automatic deletion or corruption repair.
+
+The held device explicitly imports the next independently verified
+offline bundle:
+
+```sh
+swarmcraft --data-dir "$HOLDER_PROFILE" exclusive-turn save checkpoint \
+  --expected-world "$WORLD" --expected-grant "$GRANT" \
+  --expected-checkpoint "$PREVIOUS_COMMITMENT" \
+  --bundle "$NEW_BUNDLE" --confirm
+```
+
+The exact current checkpoint pin and signed compatibility must match.
+The opaque checkpoint and writer operations are not available to a
+format-2 world. Preparation remains a durable fence; the source cannot
+mutate the checkpoint or restore a held save while prepared. The
+recipient must fetch the prepared offer's complete data into its own
+managed store before the existing authenticated network handoff may
+begin. In format 2 omit the source's `save serve --bundle` and the
+recipient's `save fetch --destination`: the paths are derived from the
+exact reviewed journal/offer and cannot be overridden. The same offer
+can retransmit already retained verified bytes (including after a lost
+completion marker) without replacing any bundle or changing the
+journal. Format 1 still requires the explicit external bundle/path.
+
+The ordinary network handoff verifies the complete matching recipient
+bundle before advertising its listener, after reacquiring the lock and
+before signing the stage receipt. The source rechecks its own exact
+bundle before committing the irreversible release. The recipient
+rechecks retained bytes and exact staged receipt before accepting and
+before acknowledging an identical already-accepted release. A corrupted
+or missing current or staged blob fences further supported journal
+operations, including retry. File-only stage, commit, release export
+and accept commands refuse format 2; exact outbox recovery is through
+the authenticated network exchange with the original pins. The
+two-device CFT assumption and all original counter/identity checks
+remain mandatory. A failed exchange can leave neither device held;
+there is no automatic takeover, data repair or reset of a release.
+
+The held reference device can restore the exact managed checkpoint
+to a new offline directory outside the authority profile:
+
+```sh
+swarmcraft --data-dir "$HOLDER_PROFILE" exclusive-turn save restore-held \
+  --expected-world "$WORLD" --expected-grant "$GRANT" \
+  --expected-checkpoint "$COMMITMENT" \
+  --destination "$NEW_OFFLINE_SAVE" --confirm
+```
+
+This is a data materialization operation under the journal lock, NOT
+permission to start a JVM. An exported offline save is not a live
+exclusive writer, and its later use outside this API is not fenced.
+The generic offline data-only restore remains available independently
+of authority state. Neither format creates canonical authority,
+Minecraft runtime activation, player admission or a freshness lease.
+Full rehash/fsync is intentionally conservative and may cause refusal
+on slow disks or large saves; the original handoff I/O deadlines are
+unchanged, and local filesystem I/O is not preemptible. The future
+production adapter must independently validate runtime compatibility,
+actual Minecraft semantics and save barrier, supervise/retire the JVM
+and all descendants, enforce Fabric epoch/route fencing, and apply
+explicit resource consent. Do not use these reference records as
+production runtime grants.
+
+The new protocol regression verifies the format-committed identity,
+invalid old approval reuse, no cross-policy release, downgrade refusal
+and preservation through verified release history. All 140 protocol
+and consensus tests passed. The new real two-profile subprocess gate
+requires full initial approvals, refuses manifest-only init, opaque
+writer and file-only handoff; captures changed save bytes, refuses
+missing/corrupt bundle data before stage and after a committed release
+is lost, then accepts only the exact retry. It independently verifies
+the signed recipient acknowledgment, restores exact data under the held
+grant, and returns the turn at epoch and fence 3 using an existing
+verified bundle. All nine exclusive-turn CLI tests passed in 52.61s.
+These are synthetic save-tree and TCP process tests, not actual
+Minecraft runtime or independent-device acceptance.
+
+The final CLI library regression passed 210 enabled tests in 28.09s
+(three delegated cgroup tests ignored). Strict all-target/all-feature
+protocol, consensus and CLI Clippy, formatting, workflow and release
+checks passed. [Retained output and source/artifact pins](../../research/exclusive-turn/evidence/2026-11-26-save-backed-policy.txt).

@@ -252,6 +252,7 @@ fn serve(
         "reference writer limits out of bounds"
     );
     let (store, mut journal, head) = opened(paths, &review.pin)?;
+    ensure!(!head.save_backed(), "opaque writer is unavailable for save-backed reference worlds");
     ensure!(journal.phase == Phase::Held && head.holder() == store.identity.peer_id(), "reference turn is not held");
     ensure!(
         journal.checkpoint.reference_commitment == expected_checkpoint,
@@ -300,6 +301,7 @@ fn request(
     review.confirm()?;
     let (remote, address) = endpoint(peer)?;
     let (store, journal, head) = opened(paths, &review.pin)?;
+    ensure!(!head.save_backed(), "opaque writer is unavailable for save-backed reference worlds");
     let local = store.identity.peer_id();
     ensure!(
         matches!(journal.phase, Phase::Replica | Phase::Released) && head.holder() == remote,
