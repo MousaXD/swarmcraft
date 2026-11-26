@@ -23,6 +23,8 @@ use swarm_protocol::{
     MAX_OWNERLESS_HISTORY_BYTES, MAX_OWNERLESS_VALIDATORS,
 };
 
+#[path = "ownerless_decision.rs"]
+mod decision;
 #[path = "ownerless_observation.rs"]
 mod observation;
 #[path = "ownerless_participation.rs"]
@@ -34,6 +36,11 @@ const STORE: &str = "ownerless-authority-lab-v1";
 
 #[derive(Debug, Subcommand)]
 pub enum AuthorityCommand {
+    /// Explicitly reviewed, encrypted reference decision exchange; no runtime authority.
+    Decision {
+        #[command(subcommand)]
+        command: decision::DecisionCommand,
+    },
     /// Bounded signed TCP reference head observations; never a lease or permit.
     Observe {
         #[command(subcommand)]
@@ -536,6 +543,7 @@ impl Store {
 pub fn run(paths: &DataPaths, command: AuthorityCommand) -> Result<()> {
     use AuthorityCommand::*;
     match command {
+        Decision { command } => decision::run(paths, command),
         Observe { command } => observation::run(paths, command),
         Participation { command } => participation::run(paths, command),
         StateHash { checkpoint: file } => {

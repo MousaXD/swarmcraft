@@ -73,8 +73,11 @@ impossible under the **honest durable one-vote-per-parent** CFT assumption.
 Joint approval transfers that property to the next roster. A live quorum
 is not inferred from a historical certificate. The governance protocol intentionally
 has no leader election, vote timeout, automatic view change, lease or live
-decision transport. The separate [network observation follow-up](ownerless-network-observation.md)
-provides nonce-bound private TCP head observations, not live authority. Different locked minority proposals can stall permanently;
+canonical authority. The separate [network observation follow-up](ownerless-network-observation.md)
+provides nonce-bound private TCP head observations, not live authority.
+The [encrypted reference decision exchange](ownerless-network-decision.md)
+transports explicitly reviewed proposals, candidate bytes and durable votes;
+it does not disseminate certificates or activate gameplay. Different locked minority proposals can stall permanently;
 the design fails closed rather than resetting votes to manufacture progress.
 
 A minority cannot certify another head or recovery fence. It can export

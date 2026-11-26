@@ -843,6 +843,255 @@ struct ObservationListener {
     address: String,
 }
 
+impl Fixture {
+    fn decision_serve(&self, voter: usize, proposer: usize, head: &str, p: &(PathBuf, String)) -> Command {
+        cmd(
+            &self.profiles[voter],
+            &[
+                "decision",
+                "serve-vote",
+                "--expected-world",
+                &self.world,
+                "--expected-head",
+                head,
+                "--proposal",
+                s(&p.0),
+                "--expected-proposal",
+                &p.1,
+                "--from",
+                &self.identities[proposer].peer_id().to_string(),
+                "--bind",
+                "127.0.0.1:0",
+                "--confirm",
+            ],
+        )
+    }
+
+    fn decision_listener(
+        &self,
+        voter: usize,
+        proposer: usize,
+        head: &str,
+        p: &(PathBuf, String),
+    ) -> ObservationListener {
+        use std::io::BufRead;
+        let child = self
+            .decision_serve(voter, proposer, head, p)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut listener = ObservationListener { child: Some(child), address: String::new() };
+        let mut line = String::new();
+        std::io::BufReader::new(listener.child.as_mut().unwrap().stdout.as_mut().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        assert!(!line.is_empty(), "decision listener failed before readiness");
+        let ready: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(ready["classification"], "ownerless_reference_decision_listener");
+        assert_eq!(ready["validator"], self.identities[voter].peer_id().to_string());
+        assert_eq!(ready["proposal"], p.1);
+        assert_eq!(ready["runtime_activation"], false);
+        listener.address = ready["address"].as_str().unwrap().to_owned();
+        listener
+    }
+
+    fn decision_request(
+        &self,
+        proposer: usize,
+        voter: usize,
+        head: &str,
+        p: &(PathBuf, String),
+        state: &Path,
+        addr: &str,
+    ) -> Output {
+        invoke(
+            &self.profiles[proposer],
+            &[
+                "decision",
+                "request-vote",
+                "--expected-world",
+                &self.world,
+                "--expected-head",
+                head,
+                "--proposal",
+                s(&p.0),
+                "--expected-proposal",
+                &p.1,
+                "--checkpoint",
+                s(state),
+                "--peer",
+                &format!("{}@{}", self.identities[voter].peer_id(), addr),
+                "--confirm",
+            ],
+        )
+    }
+}
+
+// Inspect the actual framed TCP exchange without access to its ephemeral keys.
+// Forward only the known message sequence, with optional corruption or loss.
+fn decision_proxy(
+    listener: std::net::TcpListener,
+    target: String,
+    checkpoint_chunks: usize,
+    corrupt_checkpoint: bool,
+    drop_vote: bool,
+) -> Vec<u8> {
+    use std::{
+        io::{Read, Write},
+        net::TcpStream,
+        time::Duration,
+    };
+    fn relay(from: &mut TcpStream, to: &mut TcpStream, capture: &mut Vec<u8>, corrupt: bool, drop: bool) {
+        let mut header = [0; 4];
+        from.read_exact(&mut header).unwrap();
+        let size = u32::from_be_bytes(header) as usize;
+        assert!((1..=32784).contains(&size));
+        let mut bytes = vec![0; size];
+        from.read_exact(&mut bytes).unwrap();
+        capture.extend_from_slice(&header);
+        capture.extend_from_slice(&bytes);
+        if corrupt {
+            bytes[0] ^= 1;
+        }
+        if !drop {
+            to.write_all(&header).unwrap();
+            to.write_all(&bytes).unwrap();
+        }
+    }
+    let (mut client, _) = listener.accept().unwrap();
+    let mut server = TcpStream::connect(target).unwrap();
+    for stream in [&client, &server] {
+        stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        stream.set_write_timeout(Some(Duration::from_secs(10))).unwrap();
+        stream.set_nodelay(true).unwrap();
+    }
+    let mut capture = Vec::new();
+    relay(&mut client, &mut server, &mut capture, false, false); // Noise NN first message
+    relay(&mut server, &mut client, &mut capture, false, false); // Noise NN second message
+    relay(&mut server, &mut client, &mut capture, false, false); // responder auth
+    relay(&mut client, &mut server, &mut capture, false, false); // initiator auth
+    for _ in 0..3 {
+        // proposal length, proposal, checkpoint length
+        relay(&mut client, &mut server, &mut capture, false, false);
+    }
+    for i in 0..checkpoint_chunks {
+        relay(&mut client, &mut server, &mut capture, corrupt_checkpoint && i + 1 == checkpoint_chunks, false);
+    }
+    if !corrupt_checkpoint {
+        relay(&mut server, &mut client, &mut capture, false, drop_vote); // vote length
+        relay(&mut server, &mut client, &mut capture, false, drop_vote); // vote
+    }
+    capture
+}
+
+#[test]
+fn encrypted_decision_vote_loss_restart_and_exact_checkpoint() {
+    use std::{net::TcpListener, thread};
+    let f = Fixture::new();
+    let founder = fs::read(f.journal(0)).unwrap();
+    let marker = b"private-reference-checkpoint-content-66";
+    // Exact upper bound exercises 32 authenticated chunks, not only tiny JSON.
+    let mut payload = vec![0u8; swarm_protocol::MAX_OWNERLESS_CHECKPOINT_BYTES];
+    payload[..marker.len()].copy_from_slice(marker);
+    let state = f.state("network-state.bin", &payload);
+    let p = f.propose(&f.genesis, &f.initial_head, "net-proposal.json", &["--checkpoint", s(&state)]);
+    let before = fs::read(f.journal(2)).unwrap();
+    let listener = f.decision_listener(2, 1, &f.initial_head, &p);
+    let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = proxy.local_addr().unwrap().to_string();
+    let target = listener.address.clone();
+    let relay = thread::spawn(move || decision_proxy(proxy, target, 32, true, false));
+    let result = f.decision_request(1, 2, &f.initial_head, &p, &state, &addr);
+    assert!(!result.status.success());
+    assert!(!listener.finish().status.success());
+    let capture = relay.join().unwrap();
+    assert!(!capture.windows(marker.len()).any(|w| w == marker));
+    assert_eq!(fs::read(f.journal(2)).unwrap(), before);
+    // Lose the response after the real responder durably records its vote.
+    let listener = f.decision_listener(2, 1, &f.initial_head, &p);
+    let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = proxy.local_addr().unwrap().to_string();
+    let target = listener.address.clone();
+    let relay = thread::spawn(move || decision_proxy(proxy, target, 32, false, true));
+    let result = f.decision_request(1, 2, &f.initial_head, &p, &state, &addr);
+    assert!(!result.status.success());
+    success(listener.finish());
+    let capture = relay.join().unwrap();
+    assert!(!capture.windows(marker.len()).any(|w| w == marker));
+    assert_eq!(json(f.status(2))["pending_proposal"], p.1);
+    let locked = fs::read(f.journal(2)).unwrap();
+    let conflict = f.propose(&f.genesis, &f.initial_head, "conflict.json", &["--recover"]);
+    rejected(f.decision_serve(2, 1, &f.initial_head, &conflict).output().unwrap(), "already locked");
+    let listener = f.decision_listener(2, 1, &f.initial_head, &p);
+    let vote = success(f.decision_request(1, 2, &f.initial_head, &p, &state, &listener.address));
+    success(listener.finish());
+    assert_eq!(fs::read(f.journal(2)).unwrap(), locked);
+    assert_eq!(vote, success(f.vote_cmd(2, &f.initial_head, &p, &state).output().unwrap()));
+    let remote_vote = f.path("network-vote.json");
+    fs::write(&remote_vote, vote).unwrap();
+    let local_vote = f.vote(1, &f.initial_head, &p, &state, "local-vote.json");
+    let history = f.certified(&f.genesis, &f.initial_head, &p, &[&remote_vote, &local_vote], "net-history.json");
+    f.sync(&[1, 2], &history, &p.1, &state, 1, 1);
+    assert_eq!(fs::read(f.journal(0)).unwrap(), founder);
+    f.assert_no_live_storage();
+}
+
+#[test]
+fn encrypted_decision_pins_both_identities_and_rechecks_head() {
+    let f = Fixture::new();
+    let p = f.propose(&f.genesis, &f.initial_head, "recover.json", &["--recover"]);
+    let before = fs::read(f.journal(2)).unwrap();
+    rejected(f.decision_serve(2, 3, &f.initial_head, &p).output().unwrap(), "current validator");
+    let listener = f.decision_listener(2, 1, &f.initial_head, &p);
+    // The caller claims the endpoint belongs to a different accepted validator.
+    let wrong = f.decision_request(1, 0, &f.initial_head, &p, &f.initial, &listener.address);
+    assert!(!wrong.status.success());
+    assert!(!listener.finish().status.success());
+    let listener = f.decision_listener(2, 1, &f.initial_head, &p);
+    let wrong = f.decision_request(0, 2, &f.initial_head, &p, &f.initial, &listener.address);
+    assert!(!wrong.status.success());
+    assert!(!listener.finish().status.success());
+    assert_eq!(fs::read(f.journal(2)).unwrap(), before);
+    let listener = f.decision_listener(2, 1, &f.initial_head, &p);
+    let v0 = f.vote(0, &f.initial_head, &p, &f.initial, "v0.json");
+    let v1 = f.vote(1, &f.initial_head, &p, &f.initial, "v1.json");
+    let history = f.certified(&f.genesis, &f.initial_head, &p, &[&v0, &v1], "recovered.json");
+    f.sync(&[2], &history, &p.1, &f.initial, 1, 2);
+    let advanced = fs::read(f.journal(2)).unwrap();
+    let late = f.decision_request(1, 2, &f.initial_head, &p, &f.initial, &listener.address);
+    assert!(!late.status.success());
+    rejected(listener.finish(), "accepted head differs");
+    assert_eq!(fs::read(f.journal(2)).unwrap(), advanced);
+    f.assert_no_live_storage();
+}
+
+#[test]
+fn encrypted_decision_joint_roster_requires_entrant_vote() {
+    let f = Fixture::new();
+    let keys: Vec<_> = [1, 2, 3].iter().map(|&i| hex::encode(f.identities[i].public_key())).collect();
+    let p = f.propose(
+        &f.genesis,
+        &f.initial_head,
+        "joint.json",
+        &["--validator-key", &keys[0], "--validator-key", &keys[1], "--validator-key", &keys[2]],
+    );
+    rejected(f.decision_serve(4, 1, &f.initial_head, &p).output().unwrap(), "not an eligible ownerless validator");
+    let v1 = f.vote(1, &f.initial_head, &p, &f.initial, "joint-v1.json");
+    let listener = f.decision_listener(2, 1, &f.initial_head, &p);
+    let v2 = f.path("joint-v2.json");
+    fs::write(&v2, success(f.decision_request(1, 2, &f.initial_head, &p, &f.initial, &listener.address))).unwrap();
+    success(listener.finish());
+    assert!(!f.assemble(&f.genesis, &f.initial_head, &p, &[&v1, &v2]).status.success());
+    let listener = f.decision_listener(3, 1, &f.initial_head, &p);
+    let v3 = f.path("joint-v3.json");
+    fs::write(&v3, success(f.decision_request(1, 3, &f.initial_head, &p, &f.initial, &listener.address))).unwrap();
+    success(listener.finish());
+    let history = f.certified(&f.genesis, &f.initial_head, &p, &[&v1, &v2, &v3], "joint-history.json");
+    f.sync(&[1, 2, 3], &history, &p.1, &f.initial, 1, 2);
+    f.assert_no_live_storage();
+}
+
 impl ObservationListener {
     fn finish(mut self) -> Output {
         self.child.take().unwrap().wait_with_output().unwrap()

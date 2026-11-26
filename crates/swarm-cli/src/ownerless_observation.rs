@@ -57,20 +57,20 @@ pub enum ObservationCommand {
     },
 }
 
-fn private_ip(ip: IpAddr) -> bool {
+pub(super) fn private_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => v4.is_loopback() || v4.is_private(),
         IpAddr::V6(v6) => v6.is_loopback() || v6.is_unique_local(),
     }
 }
 
-fn remaining(deadline: Instant) -> Result<Duration> {
+pub(super) fn remaining(deadline: Instant) -> Result<Duration> {
     let left = deadline.saturating_duration_since(Instant::now());
     ensure!(!left.is_zero(), "ownerless observation deadline expired");
     Ok(left)
 }
 
-fn read_all(stream: &mut TcpStream, mut bytes: &mut [u8], deadline: Instant) -> Result<()> {
+pub(super) fn read_all(stream: &mut TcpStream, mut bytes: &mut [u8], deadline: Instant) -> Result<()> {
     while !bytes.is_empty() {
         stream.set_read_timeout(Some(remaining(deadline)?))?;
         match stream.read(bytes) {
@@ -84,7 +84,7 @@ fn read_all(stream: &mut TcpStream, mut bytes: &mut [u8], deadline: Instant) -> 
     Ok(())
 }
 
-fn write_all(stream: &mut TcpStream, mut bytes: &[u8], deadline: Instant) -> Result<()> {
+pub(super) fn write_all(stream: &mut TcpStream, mut bytes: &[u8], deadline: Instant) -> Result<()> {
     while !bytes.is_empty() {
         stream.set_write_timeout(Some(remaining(deadline)?))?;
         match stream.write(bytes) {
