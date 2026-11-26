@@ -107,6 +107,35 @@ class RecoveryTests(unittest.TestCase):
         with self.assertRaises(Rejected):
             self.a.begin_probe()
 
+    def test_batched_seal_cannot_bypass_withdrawn_consent(self):
+        runtime=self.start()
+        inputs=list(commands(self.a,1,1).items())
+        self.a.configure(choices(a=96,b=0,ra=3,rb=3))
+        before=self.a.audit()
+        with self.assertRaisesRegex(Rejected,"contribution scope fenced"):
+            runtime.advance(inputs=inputs)
+        self.assertEqual(self.a.audit(),before)
+        self.assertTrue(runtime.runtime.frozen)
+
+    def test_batched_inputs_survive_withdrawal_before_publication(self):
+        runtime=self.start()
+        inputs=list(commands(self.a,1,1).items())
+        before=self.a.save()
+        def withdraw():
+            other=RecoveryAuthority(self.path)
+            try:
+                other.configure(choices(a=96,b=0,ra=3,rb=3))
+            finally:
+                other.close()
+        with self.assertRaisesRegex(Rejected,"contribution scope fenced"):
+            runtime.advance(inputs=inputs,before_publish=withdraw)
+        self.assertEqual(self.a.save(),before)
+        self.assertEqual(len(self.a.audit()["commands"]),len(inputs))
+        self.assertIsNone(self.a.audit()["batches"][0]["result"])
+        with self.assertRaises(Rejected):
+            self.a.committed_receipts(inputs)
+        self.assertTrue(runtime.runtime.frozen)
+
     def test_fence_after_staged_candidate_even_before_rotation(self):
         runtime=self.start()
         c=runtime.runtime.coordinator

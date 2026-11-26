@@ -88,6 +88,37 @@ class TimingTests(unittest.TestCase):
             with self.assertRaises(Rejected):
                 verify_profile()
             rows[0]["phase_ns"]=saved
+
+    def test_transaction_boundary_evidence(self):
+        rows=self.timed_rows(5_000_000)
+        for row in rows:
+            phases=dict.fromkeys(PHASES,1)
+            phases["other"]=5_000_000-len(PHASES)+1
+            row["phase_ns"]=phases
+            row["transactions"]={"write":2,"read":2,"commit":4,"rollback":0}
+        evidence={"ticks":rows,"summary":summarize(rows),"coordinator_cpu_ns":1}
+        verify_timing(evidence,True,"batched")
+        with self.assertRaises(Rejected):
+            verify_timing(evidence,True,"individual")
+        for bad in ({"write":6}, {"rollback":1}, {"commit":3}, {"read":True}, {"extra":0}):
+            saved=rows[0]["transactions"].copy()
+            rows[0]["transactions"].update(bad)
+            with self.assertRaises(Rejected):
+                verify_timing(evidence,True,"batched")
+            rows[0]["transactions"]=saved
+
+    def test_trace_counts_only_current_tick_boundaries(self):
+        clock=PhaseClock()
+        clock.trace("BEGIN IMMEDIATE")
+        clock.begin()
+        for statement in ("BEGIN IMMEDIATE", "INSERT INTO commands VALUES(1)", "COMMIT",
+                          "BEGIN", "SELECT * FROM world", "COMMIT"):
+            clock.trace(statement)
+        clock.finish(1)
+        clock.trace("BEGIN")
+        self.assertEqual(clock.transactions,{"write":1,"read":1,"commit":2,"rollback":0})
+
+
 class RetainedEvidenceTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -138,6 +169,18 @@ class RetainedEvidenceTests(unittest.TestCase):
         self.assertEqual(result["client_commands"],3766)
         self.assertEqual(result["qualified_runs"],0)
         self.assertEqual(len(result["phase_profile"]),12)
+
+    def test_batched_transaction_matrix(self):
+        path=Path(__file__).parent/"evidence"/"2026-11-26-scale-batched.json"
+        report=json.loads(path.read_text())
+        result=verify(report)
+        self.assertEqual(result["state_cache"],"cached")
+        self.assertEqual(result["input_mode"],"batched")
+        self.assertEqual(result["runs"],24)
+        self.assertEqual(result["accepted_ticks"],2069)
+        self.assertEqual(result["client_commands"],4138)
+        self.assertEqual(result["qualified_runs"],0)
+        self.assertEqual(result["transactions"],{"write":4138,"read":4138,"commit":8276,"rollback":0})
 
 
 if __name__=="__main__":

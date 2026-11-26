@@ -9,9 +9,9 @@ from __future__ import annotations
 import hashlib
 import json
 
-from player_runtime import player_index, player_view
+from player_runtime import MAX_PLAYERS, player_index, player_view
 from region_runtime import (MAX_AGENTS, MAX_TICK, WIDTH, canonical, digest,
-                            fields, integer, region_roots, require, serial_step, world_root)
+                            fields, integer, region_roots, require, sequence, serial_step, world_root)
 from regional_authority import Authority, FencedRuntime, validated_state, wire
 
 RULESET = "swarmcraft-reference-ring/transaction-v2"
@@ -28,6 +28,25 @@ def checked_command(player, request, world, players):
             and integer(request["direction"], -1, 1)
             and integer(request["action"], -1, 1), "invalid authenticated player command")
     return request
+
+
+def checked_batch(inputs, current):
+    """Bounded, distinct authenticated connection identities at one cut."""
+    rows = sequence(inputs, maximum=MAX_PLAYERS)
+    require(rows, "empty authenticated command batch")
+    result, players, ids = [], set(), set()
+    pin = None
+    for row in rows:
+        player, request = sequence(row, 2)
+        checked_command(player, request, current["world"], current["players"])
+        require(player not in players and request["id"] not in ids, "duplicate batch player or command ID")
+        target = (request["tick"], request["parent"])
+        require(pin is None or target == pin, "mixed command batch cuts")
+        pin = target
+        players.add(player)
+        ids.add(request["id"])
+        result.append((player, request))
+    return result
 
 
 def transition_view(world, tick, cut, state, players, player):
@@ -98,27 +117,83 @@ class TransitionAuthority(Authority):
         """
         with self.transaction(write=True):
             cur = self._read()
-            checked_command(player, request, cur["world"], cur["players"])
-            existing = self.db.execute("SELECT player,request,response FROM commands WHERE request_id=?",
-                                       (request["id"],)).fetchone()
-            if existing is not None:
-                require(existing[0] == player and existing[1] == canonical(request),
-                        "conflicting command replay")
-                if existing[2] is not None:
-                    return json.loads(existing[2])
-                require(request["tick"] == cur["tick"] + 1 and request["parent"] == cur["cut_root"],
-                        "orphaned pending command")
-            else:
-                require(request["tick"] == cur["tick"] + 1 and request["parent"] == cur["cut_root"],
-                        "stale or future command cut")
-                require(self.db.execute("SELECT 1 FROM batches WHERE tick=?", (request["tick"],)).fetchone()
-                        is None, "tick input already sealed")
-                require(self.db.execute("SELECT 1 FROM commands WHERE tick=? AND player=?",
-                                        (request["tick"], player)).fetchone() is None,
-                        "player already has an input for this tick")
-                self.db.execute("INSERT INTO commands VALUES(?,?,?,?,NULL)",
-                                (request["tick"], player, request["id"], canonical(request)))
-            return {"op": "queued", "id": request["id"], "tick": request["tick"]}
+            return self._submit_locked(cur, player, request)
+
+    def _submit_locked(self, cur, player, request, *, pending_only=False):
+        checked_command(player, request, cur["world"], cur["players"])
+        raw = canonical(request)
+        existing = self.db.execute("SELECT tick,player,request,response FROM commands WHERE request_id=?",
+                                   (request["id"],)).fetchone()
+        if existing is not None:
+            require(existing[:3] == (request["tick"], player, raw), "conflicting command replay")
+            if existing[3] is not None:
+                require(not pending_only, "batch contains an already committed command")
+                return json.loads(existing[3])
+            require(request["tick"] == cur["tick"] + 1 and request["parent"] == cur["cut_root"],
+                    "orphaned pending command")
+        else:
+            require(request["tick"] == cur["tick"] + 1 and request["parent"] == cur["cut_root"],
+                    "stale or future command cut")
+            require(self.db.execute("SELECT 1 FROM batches WHERE tick=?", (request["tick"],)).fetchone()
+                    is None, "tick input already sealed")
+            require(self.db.execute("SELECT 1 FROM commands WHERE tick=? AND player=?",
+                                    (request["tick"], player)).fetchone() is None,
+                    "player already has an input for this tick")
+            self.db.execute("INSERT INTO commands VALUES(?,?,?,?,NULL)",
+                            (request["tick"], player, request["id"], raw))
+        return {"op": "queued", "id": request["id"], "tick": request["tick"]}
+
+    def _queue_batch(self, current, inputs):
+        rows = checked_batch(inputs, current)
+        return [self._submit_locked(current, p, req, pending_only=True) for p, req in rows]
+
+    def submit_batch(self, inputs):
+        """All pending commands or none; no result before FULL commit."""
+        with self.transaction(write=True):
+            return self._queue_batch(self._read(), inputs)
+
+    def committed_receipts(self, inputs):
+        """Read exact persisted results for one accepted cut, never enqueue.
+
+        The authority validates the current head as usual and binds every
+        requested result to the historical commit and immutable sealed inputs.
+        Independent replay at publication and reopen remains unchanged.
+        """
+        with self.transaction():
+            cur = self._read()
+            rows = checked_batch(inputs, cur)
+            tick, parent = rows[0][1]["tick"], rows[0][1]["parent"]
+            require(tick <= cur["tick"], "command cut not committed")
+            prior = self.db.execute("SELECT runtime_root,cut_root FROM commits WHERE tick=?", (tick-1,)).fetchone()
+            accepted = self.db.execute("SELECT runtime_root,cut_root,parent_root FROM commits WHERE tick=?", (tick,)).fetchone()
+            require(prior is not None and accepted is not None and prior[1] == parent
+                    and accepted[2] == prior[0]
+                    and accepted[1] == self.cut(cur["world"], tick, accepted[0], cur["players"]),
+                    "invalid committed command ancestry")
+            commands, batch = self._commands(cur, tick, parent)
+            sealed = self.db.execute("SELECT parent,inputs,result FROM batches WHERE tick=?", (tick,)).fetchone()
+            require(sealed == (parent, canonical(batch), accepted[1]), "invalid committed command batch")
+            results = []
+            for player, request in rows:
+                stored = commands.get(player)
+                require(stored is not None and stored[0] == request and stored[1] is not None,
+                        "no exact committed command receipt")
+                result = json.loads(stored[1])
+                fields(result, "op", "id", "view", "inventory_delta")
+                view = result["view"]
+                fields(view, "op", "protocol", "ruleset", "world", "tick", "root", "player",
+                       "position", "region", "inventory", "cells")
+                require(stored[1] == canonical(result) and result["op"] == "committed"
+                        and result["id"] == request["id"] and integer(result["inventory_delta"], -1, 1)
+                        and view["op"] == "view" and view["protocol"] == PROTOCOL and view["ruleset"] == RULESET
+                        and view["world"] == cur["world"] and view["tick"] == tick
+                        and view["root"] == accepted[1] and view["player"] == player,
+                        "invalid persisted committed receipt")
+                if tick == cur["tick"]:
+                    require(view == transition_view(cur["world"], tick, cur["cut_root"], cur["state"],
+                                                    cur["players"], player), "receipt differs from current accepted view")
+                results.append(result)
+            return results
 
     def _commands(self, current, tick, parent):
         commands = {}
@@ -136,13 +211,18 @@ class TransitionAuthority(Authority):
     def _before_seal(self, current):
         pass
 
-    def seal_next(self, generation, tick, root):
+    def seal_next(self, generation, tick, root, *, inputs=None):
         with self.transaction(write=True):
             cur = self._read()
             require(cur["claimed"] and cur["generation"] == generation and
                     (cur["tick"], cur["runtime_root"]) == (tick, root) and tick < MAX_TICK,
                     "retired runtime cannot seal input")
             self._before_seal(cur)
+            if inputs is not None:
+                # Queue and seal in the same FULL transaction. No worker
+                # sees controls until the transaction has committed.
+                with self.phase("command_journal"):
+                    self._queue_batch(cur, inputs)
             commands, batch = self._commands(cur, tick + 1, cur["cut_root"])
             require(all(result is None for _, result in commands.values()), "pending result already committed")
             existing = self.db.execute("SELECT parent,inputs,result FROM batches WHERE tick=?", (tick + 1,)).fetchone()
@@ -225,15 +305,15 @@ class DurableRuntime:
         self.authority = authority
         self.runtime = FencedRuntime(authority, channels)
 
-    def seal(self):
+    def seal(self, *, inputs=None):
         require(not self.runtime.frozen, "fenced runtime frozen")
         c = self.runtime.coordinator
-        return self.authority.seal_next(self.runtime.generation, c.tick, c.root)
+        return self.authority.seal_next(self.runtime.generation, c.tick, c.root, inputs=inputs)
 
-    def advance(self, *, fault=None, before_publish=None):
+    def advance(self, *, fault=None, before_publish=None, inputs=None):
         try:
             with self.authority.phase("seal_inputs"):
-                controls = self.seal()
+                controls = self.seal(inputs=inputs)
             return self.runtime.advance(controls=controls, fault=fault, before_publish=before_publish)
         except BaseException:
             self.runtime.frozen = self.runtime.coordinator.poisoned = True

@@ -23,10 +23,20 @@ class PhaseClock:
     def __init__(self):
         self.values = None
         self.stack = []
+        self.transactions = None
 
     def begin(self):
         require(self.values is None and not self.stack, "overlapping profile ticks")
         self.values = dict.fromkeys(PHASES, 0)
+        self.transactions = dict.fromkeys(("write", "read", "commit", "rollback"), 0)
+
+    def trace(self, statement):
+        """Count transaction boundaries only; never retain statement payloads."""
+        if self.values is not None:
+            kind = {"BEGIN IMMEDIATE": "write", "BEGIN": "read",
+                    "COMMIT": "commit", "ROLLBACK": "rollback"}.get(statement)
+            if kind is not None:
+                self.transactions[kind] += 1
 
     @contextmanager
     def phase(self, name):

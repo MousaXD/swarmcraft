@@ -3,6 +3,11 @@
 Date: 26 November 2026. Reference transaction lab only; no actual
 Minecraft or independent-host qualification.
 
+Follow-up: [Atomic batching and receipt lookup](SCALE_BATCH_REPORT.md)
+reduces transaction boundaries while preserving the same durable
+publication checks. The measurements below are the original
+individual-submission cached run.
+
 ## Change and safety boundary
 
 The original authority reparsed the same complete SQLite world BLOB,
@@ -153,7 +158,8 @@ systemd-run --user --scope --quiet \
   bash scripts/e2e/linux_cgroup_memory_gate.sh \
   unshare --user --map-root-user --net \
   python3 research/distributed-simulation/scale_lab.py \
-  --state-cache "$mode" --output "/tmp/sc63-$mode-new.json"
+  --state-cache "$mode" --input-mode individual \
+  --output "/tmp/sc63-$mode-new.json"
 cd research/distributed-simulation
 python3 verify_scale_evidence.py "/tmp/sc63-$mode-new.json"
 python3 -m unittest discover -s . -p 'test_*.py' -v

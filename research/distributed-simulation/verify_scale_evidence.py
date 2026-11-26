@@ -39,7 +39,7 @@ def expected_stats(ns):
             "unpaced_service_ticks_per_second":len(samples)*1000/sum(samples)}
 
 
-def verify_timing(row,profile=False):
+def verify_timing(row,profile=False,input_mode=None):
     ticks=row["ticks"]
     target=WINDOW_NS//PERIOD_NS
     require(1<=len(ticks)<=target,"invalid tick sample count")
@@ -47,7 +47,8 @@ def verify_timing(row,profile=False):
     service,latency=[],[]
     for t,r in enumerate(ticks,1):
         fields(r,"tick","scheduled_ns","begin_ns","finish_ns","root","cut_root",
-               *("phase_ns",) if profile else ())
+               *("phase_ns",) if profile else (),
+               *("transactions",) if input_mode is not None else ())
         scheduled=(t-1)*PERIOD_NS
         require(r["tick"]==t and r["scheduled_ns"]==scheduled
                 and integer(r["begin_ns"],max(last,scheduled),WINDOW_NS-1)
@@ -63,6 +64,14 @@ def verify_timing(row,profile=False):
                     and all(phases[k]>0 for k in ("state_decode_roots","worker_tick",
                         "worker_receipts","sqlite_durable_commit","independent_serial_replay",
                         "client_acknowledgment","resource_guard")), "invalid exclusive phase timing")
+        if input_mode is not None:
+            counts=r["transactions"]
+            fields(counts,"write","read","commit","rollback")
+            expected=(2,2,4,0) if input_mode=="batched" else (6,1,7,0)
+            require(input_mode in ("batched","individual")
+                    and all(type(v) is int for v in counts.values())
+                    and tuple(counts[k] for k in ("write","read","commit","rollback"))==expected,
+                    "unexpected transaction boundaries")
         service.append(last-r["begin_ns"])
         latency.append(last-scheduled)
     # Stopping early is permissible only if the fixed observation window
@@ -81,7 +90,7 @@ def verify_timing(row,profile=False):
     require(integer(row["coordinator_cpu_ns"],1,last),"invalid coordinator CPU time")
 
 
-def verify_run(row,scenario,repeat,count,hardware,states,roots,profile=False):
+def verify_run(row,scenario,repeat,count,hardware,states,roots,profile=False,input_mode=None):
     label,shape,agents,delay=scenario
     require((row["scenario"],row["shape"],row["agents"],row["delay_ms"],row["repeat"],row["workers"])==
             (label,shape,agents,delay,repeat,count),"wrong scenario/order")
@@ -129,7 +138,7 @@ def verify_run(row,scenario,repeat,count,hardware,states,roots,profile=False):
                         "kernel network impairment not exercised")
             else:
                 require(not a and not b,"unexpected network impairment")
-    verify_timing(row,profile)
+    verify_timing(row,profile,input_mode)
     n=len(row["ticks"])
     saved=row["final"]
     world=saved["world"]
@@ -185,11 +194,14 @@ def verify_run(row,scenario,repeat,count,hardware,states,roots,profile=False):
 
 def verify(data):
     require(isinstance(data,dict),"invalid benchmark receipt")
-    profile=data.get("schema")==2
+    profile=data.get("schema") in (2,3)
+    batched_schema=data.get("schema")==3
     fields(data,"schema","classification","completed","period_ns","window_ns","repeats","hardware","runs",
-           *("state_cache",) if profile else ())
-    require(type(data["schema"]) is int and data["schema"] in (1,2)
+           *("state_cache",) if profile else (),
+           *("input_mode",) if batched_schema else ())
+    require(type(data["schema"]) is int and data["schema"] in (1,2,3)
             and (not profile or data["state_cache"] in ("cached","uncached"))
+            and (not batched_schema or data["input_mode"] in ("batched","individual"))
             and data["classification"]==CLASSIFICATION and data["completed"] is True
             and data["period_ns"]==PERIOD_NS and data["window_ns"]==WINDOW_NS and data["repeats"]==REPEATS,
             "incomplete or misclassified benchmark")
@@ -211,13 +223,17 @@ def verify(data):
             states.append(serial_step(states[-1],t,controls={p:(d,d) for p in PLAYERS}))
         roots=[world_root(t,region_roots(state)) for t,state in enumerate(states)]
         for row,rep,count in pairs:
-            world=verify_run(row,scenario,rep,count,hw,states,roots,profile)
+            world=verify_run(row,scenario,rep,count,hw,states,roots,profile,data.get("input_mode"))
             require(world not in seen_worlds,"comparison reused authority identity")
             seen_worlds.add(world)
     result=aggregate(data)
     if profile:
         result["state_cache"]=data["state_cache"]
         result["phase_profile"]=aggregate_profile(data)
+    if batched_schema:
+        result["input_mode"]=data["input_mode"]
+        result["transactions"]={k:sum(t["transactions"][k] for r in data["runs"] for t in r["ticks"])
+                                for k in ("write","read","commit","rollback")}
     return result
 
 

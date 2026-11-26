@@ -144,7 +144,7 @@ def client_main():
 
 
 class Peers:
-    def __init__(self,ledger,tmp):
+    def __init__(self,ledger,tmp,input_mode):
         self.ledger=ledger
         self.tmp=Path(tmp)
         self.listener=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
@@ -152,6 +152,7 @@ class Peers:
         self.listener.listen(len(PLAYERS))
         self.listener.settimeout(5)
         self.entries=[]
+        self.input_mode=input_mode
 
     def __enter__(self):
         return self
@@ -193,16 +194,23 @@ class Peers:
             with self.ledger.phase("client_input_network"):
                 req=row["channel"].recv(deadline)
                 require(req==request(row["view"],row["player"]),"fixture command differs")
-            with self.ledger.phase("command_journal"):
-                require(self.ledger.submit(row["player"],req)=={"op":"queued","id":req["id"],"tick":tick},
-                        "input not queued")
+            if self.input_mode=="individual":
+                with self.ledger.phase("command_journal"):
+                    require(self.ledger.submit(row["player"],req)=={"op":"queued","id":req["id"],"tick":tick},
+                            "input not queued")
             inputs.append(req)
-        commit=runtime.advance(before_publish=guard)
+        batch=[(row["player"],req) for row,req in zip(self.entries,inputs)]
+        commit=runtime.advance(before_publish=guard,inputs=batch if self.input_mode=="batched" else None)
         deadline=time.monotonic()+3
-        receipts=[]
-        for row,req in zip(self.entries,inputs):
+        if self.input_mode=="batched":
             with self.ledger.phase("client_receipt_lookup"):
-                response=self.ledger.submit(row["player"],req)
+                committed=self.ledger.committed_receipts(batch)
+        else:
+            committed=None
+        receipts=[]
+        for index,(row,req) in enumerate(zip(self.entries,inputs)):
+            with self.ledger.phase("client_receipt_lookup"):
+                response=committed[index] if committed is not None else self.ledger.submit(row["player"],req)
                 require(response["op"]=="committed" and response["view"]["tick"]==tick
                         and response["view"]["root"]==commit["cut_root"],"uncommitted reply")
             with self.ledger.phase("client_receipt_network"):
@@ -241,7 +249,7 @@ class Peers:
             row["output"].close()
 
 
-def run_case(scope,cpus,scenario,repeat,count,state_cache):
+def run_case(scope,cpus,scenario,repeat,count,state_cache,input_mode):
     label,shape,agents,delay=scenario
     offers=[Offer(s,1,CAP_MIB,CPU_MILLICORES) for s in range(count)]
     groups=[[r for r in range(REGIONS) if r*count//REGIONS==s] for s in range(count)]
@@ -251,6 +259,7 @@ def run_case(scope,cpus,scenario,repeat,count,state_cache):
                                 fixture(shape,agents),PLAYERS,groups)
         profile=PhaseClock()
         ledger.phase=profile.phase
+        ledger.db.set_trace_callback(profile.trace)
         try:
             with FixedCappedLab(scope,offers,{s:delay for s in range(count)},cpus) as lab:
                 ping=lab.ping()
@@ -263,7 +272,7 @@ def run_case(scope,cpus,scenario,repeat,count,state_cache):
                 before_frames=[(c.sent,c.received) for c in lab.channels]
                 def guard():
                     scope.recheck([lab.observe(i) for i in range(count)])
-                with Peers(ledger,tmp) as peers:
+                with Peers(ledger,tmp,input_mode) as peers:
                     for p in PLAYERS:
                         peers.spawn(p)
                     rows=[]
@@ -284,7 +293,8 @@ def run_case(scope,cpus,scenario,repeat,count,state_cache):
                         finish=time.monotonic_ns()-start
                         rows.append({"tick":tick,"scheduled_ns":target,"begin_ns":begin,"finish_ns":finish,
                                      "root":accepted["runtime_root"],"cut_root":accepted["cut_root"],
-                                     "phase_ns":profile.finish(finish-begin)})
+                                     "phase_ns":profile.finish(finish-begin),
+                                     "transactions":profile.transactions})
                     cpu_ns=time.process_time_ns()-cpu_start
                     require(rows,"no accepted ticks")
                     clients=peers.stop()
@@ -327,7 +337,7 @@ def run(report):
         for repeat in range(1,REPEATS+1):
             # Alternate order to reduce systematic warm/cache/host-load bias.
             for count in ((1,2) if repeat%2 else (2,1)):
-                result=run_case(scope,cpus,scenario,repeat,count,report["state_cache"])
+                result=run_case(scope,cpus,scenario,repeat,count,report["state_cache"],report["input_mode"])
                 report["runs"].append(result)
                 s=result["summary"]
                 print(f"{scenario[0]} rep={repeat} workers={count}: {s['within_window']}/{s['target_ticks']} "
@@ -341,14 +351,15 @@ def main():
     parser.add_argument("--client",action="store_true")
     parser.add_argument("--output",type=Path)
     parser.add_argument("--state-cache",choices=("cached","uncached"),default="cached")
+    parser.add_argument("--input-mode",choices=("batched","individual"),default="batched")
     args=parser.parse_args()
     if args.client:
         client_main()
         return
     require(args.output is not None and not args.output.exists(),"new receipt path required")
     os.umask(0o077)
-    report={"schema":2,"classification":CLASSIFICATION,"completed":False,
-            "state_cache":args.state_cache,
+    report={"schema":3,"classification":CLASSIFICATION,"completed":False,
+            "state_cache":args.state_cache,"input_mode":args.input_mode,
             "period_ns":PERIOD_NS,"window_ns":WINDOW_NS,"repeats":REPEATS,"runs":[]}
     with args.output.open("x") as out:
         try:

@@ -2,6 +2,9 @@
 import copy
 import json
 from pathlib import Path
+import signal
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -68,6 +71,187 @@ class TransitionTests(unittest.TestCase):
             with self.subTest(player=player, bad=bad), self.assertRaises(Rejected):
                 self.a.submit(player, bad)
         self.assertEqual(self.a.audit(), baseline)
+
+    def test_batch_queue_atomic_and_exact_pending_retry(self):
+        first, second = self.request("b"), self.request("c")
+        baseline = self.a.audit()
+        # The second entry conflicts with an existing player's command.
+        # A valid first insertion must roll back with it.
+        self.a.submit(1, self.request("d"))
+        pending = self.a.audit()
+        with self.assertRaises(Rejected):
+            self.a.submit_batch([(0, first), (1, second)])
+        self.assertEqual(self.a.audit(), pending)
+        for inputs in ([], [(0, first), (0, second)], [(0, first), (1, first)],
+                       [(0, first), (1, {**second, "tick": 2})],
+                       [(0, first), (3, second)], [(0, first), (True, second)]):
+            with self.assertRaises(Rejected):
+                self.a.submit_batch(inputs)
+            self.assertEqual(self.a.audit(), pending)
+        inputs = [(0, first), (1, self.request("d"))]
+        queued = self.a.submit_batch(inputs)
+        self.assertEqual([r["op"] for r in queued], ["queued", "queued"])
+        self.assertEqual(self.a.submit_batch(inputs), queued)
+        self.assertEqual(len(self.a.audit()["commands"]), len(baseline["commands"])+2)
+        with self.assertRaises(Rejected):
+            self.a.committed_receipts(inputs)
+
+    def test_atomic_queue_and_seal_survive_restart_and_refuse_changes(self):
+        inputs = [(0, self.request("b")), (1, self.request("c"))]
+        runtime = DurableRuntime(self.a, channels())
+        before = self.a.audit()
+        with self.assertRaises(Rejected):
+            runtime.seal(inputs=[inputs[0], (1, {**inputs[1][1], "parent": "0"*64})])
+        self.assertEqual(self.a.audit(), before)
+        controls = runtime.seal(inputs=inputs)
+        self.assertEqual(runtime.seal(inputs=list(reversed(inputs))), controls)
+        journal = self.a.audit()
+        self.assertEqual(len(journal["commands"]), 2)
+        self.assertEqual(len(journal["batches"]), 1)
+        self.assertTrue(all(r["response"] is None for r in journal["commands"]))
+        for invalid in ([(0, {**inputs[0][1], "action": -1})], [(2, self.request("d"))]):
+            with self.assertRaises(Rejected):
+                runtime.seal(inputs=invalid)
+            self.assertEqual(self.a.audit(), journal)
+        before = self.a.save()
+        self.a.close()
+        self.a = TransitionAuthority(self.path)
+        self.assertEqual(self.a.audit(), journal)
+        self.a.rotate(before["generation"], before["tick"], before["runtime_root"], SWAPPED)
+        runtime = DurableRuntime(self.a, channels())
+        runtime.advance(inputs=inputs)
+        self.assertEqual([r["view"]["tick"] for r in self.a.committed_receipts(inputs)], [1, 1])
+
+    def test_fused_seal_rolls_back_insertions_if_sealing_fails(self):
+        from unittest.mock import patch
+        inputs = [(0, self.request("b")), (1, self.request("c"))]
+        runtime = DurableRuntime(self.a, channels())
+        before = self.a.audit()
+        with patch("transition_runtime.batch_controls", side_effect=RuntimeError("injected seal failure")):
+            with self.assertRaisesRegex(RuntimeError, "injected seal failure"):
+                runtime.seal(inputs=inputs)
+        self.assertEqual(self.a.audit(), before)
+        runtime.advance(inputs=inputs)
+        self.assertEqual(len(self.a.committed_receipts(inputs)), 2)
+
+    def test_batched_seal_process_death_before_and_after_durable_commit(self):
+        inputs = [(0, self.request("b")), (1, self.request("c"))]
+        DurableRuntime(self.a, channels())
+        baseline = self.a.save()
+        journal = self.a.audit()
+        program = """
+import json, os, signal, sys
+import transition_runtime as tr
+authority = tr.TransitionAuthority(sys.argv[1])
+inputs = json.loads(sys.argv[2])
+current = authority.read()
+def die(*args):
+    os.kill(os.getpid(), signal.SIGKILL)
+if sys.argv[3] == "before":
+    tr.batch_controls = die
+authority.seal_next(current["generation"], current["tick"], current["runtime_root"], inputs=inputs)
+die()
+"""
+        for phase in ("before", "after"):
+            child = subprocess.run(
+                [sys.executable, "-c", program, str(self.path), json.dumps(inputs), phase],
+                cwd=Path(__file__).parent, capture_output=True, timeout=15)
+            self.assertEqual(child.returncode, -signal.SIGKILL, child.stderr.decode(errors="replace"))
+            self.a.close()
+            self.a = TransitionAuthority(self.path)
+            self.assertEqual(self.a.save(), baseline)
+            if phase == "before":
+                self.assertEqual(self.a.audit(), journal)
+            else:
+                self.assertEqual(len(self.a.audit()["commands"]), len(inputs))
+                self.assertIsNone(self.a.audit()["batches"][0]["result"])
+        self.a.rotate(baseline["generation"], baseline["tick"], baseline["runtime_root"], SWAPPED)
+        DurableRuntime(self.a, channels()).advance(inputs=inputs)
+        self.assertEqual(len(self.a.committed_receipts(inputs)), 2)
+
+    def test_read_only_receipts_after_commit_and_reopen(self):
+        inputs = [(0, self.request("b")), (1, self.request("c"))]
+        runtime = DurableRuntime(self.a, channels())
+        runtime.advance(inputs=inputs)
+        original = self.a.audit()
+        statements = []
+        self.a.db.set_trace_callback(statements.append)
+        try:
+            result = self.a.committed_receipts(inputs)
+        finally:
+            self.a.db.set_trace_callback(None)
+        self.assertEqual([s for s in statements if s in ("BEGIN", "BEGIN IMMEDIATE", "COMMIT")],
+                         ["BEGIN", "COMMIT"])
+        self.assertTrue(all(s.startswith("SELECT") or s in ("BEGIN", "COMMIT") for s in statements))
+        self.assertEqual(self.a.audit(), original)
+        self.assertEqual(result, [self.a.submit(p, q) for p,q in inputs])
+        for bad in ([(1, inputs[0][1])], [(0, {**inputs[0][1], "direction": -1})],
+                    [(0, self.request("d"))], [(0, {**inputs[0][1], "id": "e"*64})]):
+            with self.assertRaises(Rejected):
+                self.a.committed_receipts(bad)
+        runtime.advance()
+        self.assertEqual(self.a.committed_receipts(list(reversed(inputs))), list(reversed(result)))
+        self.a.close()
+        self.a = TransitionAuthority(self.path)
+        self.assertEqual(self.a.committed_receipts(inputs), result)
+
+    def test_real_transaction_boundaries_for_individual_and_batched_ticks(self):
+        from scale_profile import PhaseClock
+        runtime = DurableRuntime(self.a, channels())
+        clock = PhaseClock()
+        self.a.db.set_trace_callback(clock.trace)
+        try:
+            for batched, keys in ((False, ("b","c")), (True, ("d","e"))):
+                inputs = [(p,self.request(k)) for p,k in enumerate(keys)]
+                clock.begin()
+                if batched:
+                    runtime.advance(inputs=inputs)
+                    self.a.committed_receipts(inputs)
+                else:
+                    for p,q in inputs:
+                        self.a.submit(p,q)
+                    runtime.advance()
+                    for p,q in inputs:
+                        self.a.submit(p,q)
+                clock.finish(1)
+                expected = {"write":2,"read":2,"commit":4,"rollback":0} if batched else {
+                    "write":6,"read":1,"commit":7,"rollback":0}
+                self.assertEqual(clock.transactions, expected)
+        finally:
+            self.a.db.set_trace_callback(None)
+
+    def test_receipt_lookup_refuses_uncommitted_and_corrupt_batch(self):
+        inputs = [(0, self.request("b")), (1, self.request("c"))]
+        runtime = DurableRuntime(self.a, channels())
+        coordinator = runtime.runtime.coordinator
+        coordinator.step(controls=runtime.seal(inputs=inputs))
+        reader = TransitionAuthority(self.path)
+        try:
+            def observe():
+                with self.assertRaises(Rejected):
+                    reader.committed_receipts(inputs)
+            self.a.commit(candidate_receipts(coordinator), before_commit=observe)
+            expected = reader.committed_receipts(inputs)
+            self.a.db.execute("UPDATE batches SET result=? WHERE tick=1", ("0"*64,))
+            with self.assertRaises(Rejected):
+                reader.committed_receipts(inputs)
+            self.a.db.execute("UPDATE batches SET result=? WHERE tick=1", (expected[0]["view"]["root"],))
+            self.a.db.execute("UPDATE commands SET response=? WHERE player=1", (b'{}',))
+            with self.assertRaises(Rejected):
+                reader.committed_receipts(inputs)
+        finally:
+            reader.close()
+
+    def test_batched_runtime_refuses_retired_generation_before_queue(self):
+        inputs = [(0, self.request("b")), (1, self.request("c"))]
+        runtime = DurableRuntime(self.a, channels())
+        before = self.a.save()
+        self.a.rotate(before["generation"], before["tick"], before["runtime_root"], GROUPS)
+        journal = self.a.audit()
+        with self.assertRaisesRegex(Rejected, "retired runtime"):
+            runtime.advance(inputs=inputs)
+        self.assertTrue(runtime.runtime.frozen)
+        self.assertEqual(self.a.audit(), journal)
 
     def test_sealed_batch_is_immutable_and_survives_restart(self):
         req = self.request()
