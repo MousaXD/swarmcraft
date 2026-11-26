@@ -1,0 +1,28 @@
+Local Linux test, 26 November 2026
+Code: 6b13b21ec1122af640bf9b53aab8db3e73ae4716
+Minecraft 26.1.2; Fabric Loader 0.19.3; Java 25
+Server SHA-256: f57b0ed3a6101da742304aa0b9efd6ff57f65732588a7d9b814029291a34b073
+Client SHA-256: 9bcf72fe09527aec7e334359e520eae97acac594d4ed27ffdebfccfd15acd591
+Test-only probe SHA-256: 4c42e4c0ced992a42f115eb8b7e44397a5bdbbabb5acee9fd173275fdb091aa0
+Original full log SHA-256: 4752f3044735e6740c5357a2faa597faf94e6846124097a8bed122ce24ede066
+Negative smoke full log SHA-256: 1f1c26e629912da9030fc7515ef95497e7d2d25079b524ad07dcb0fe2a2a7690
+Below: exact final test stdout excerpt; historical HOSTED markers are names, not hosted CI.
+
+running 1 test
+test hosted_live::real_minecraft_gateway_handoff_and_recovery ... JAVA_RECONNECT_STATUS_PASS epoch=1
+
+HOSTED_LIVE_GATEWAY_INITIAL_PASS
+JAVA_RECONNECT_STATUS_PASS epoch=2
+
+HOSTED_LIVE_GATEWAY_HANDOFF_PASS
+JAVA_RECONNECT_STATUS_PASS epoch=3
+JAVA_RECONNECT_REFUSAL_PASS
+
+HOSTED_LIVE_GATEWAY_RECOVERY_PASS
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 217.11s
+
+All three disposable peer profiles removed; no test child processes remained.
+Scope: real Minecraft status protocol and file checkpoint marker, not game login or inventory, independent machines, or installed-client GUI.
+Final signed sleep replicated to surviving voter; offline voter unacknowledged and green shutdown deliberately false.

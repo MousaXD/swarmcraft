@@ -178,14 +178,19 @@ explicit correlated refusal followed by a new challenge and save
 barrier, actual timeout invalidation and mismatched reply invalidation.
 All 89 original client-policy assertions pass. The actual Java probe
 refused all four no-daemon/unconsented/stopped/restarted scenarios,
-without opening an unauthorized socket. The corrected local real-server run passed the first two positive stages:
-initial authority epoch 1 and planned handoff to epoch 2, each with the
-actual Java decoder and native live proof followed by a fresh real
-Minecraft status exchange. The same permanent loopback address and
-saved file marker were verified. After the deliberate successor crash,
-the surviving majority certified epoch 3 and the player replica verified
-the recovered checkpoint. The remaining epoch-3 status and safe-stop
-checks are separate gates; no authenticated player login is claimed.
+without opening an unauthorized socket. The corrected local real-server run passed **all** three positive stages:
+initial authority epoch 1, planned handoff to epoch 2, and quorum-certified
+crash recovery to epoch 3. Each stage used the actual Java decoder and
+native live proof followed by a fresh real Minecraft status exchange.
+The same permanent loopback address and saved file marker were verified.
+The recovered JVM saved and stopped, the surviving voter accepted the
+exact signed sleep/checkpoint, and the Java probe refused a new route.
+Green shutdown remained false because the deliberately crashed voter
+had not acknowledged that final boundary. The full test passed in
+217.11 seconds and all three disposable peer profiles were removed.
+See [retained local result](../research/minecraft-gateway/evidence/2026-11-26-live-reconnect.txt).
+No authenticated player login, installed client GUI, in-game inventory
+or physical-machine acceptance is claimed.
 The exact rebuilt server SHA-256 was
 `f57b0ed3a6101da742304aa0b9efd6ff57f65732588a7d9b814029291a34b073`;
 the optional client JAR was byte-identical to the preceding build.
