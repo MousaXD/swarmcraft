@@ -1,6 +1,9 @@
 //! Explicit, bounded reference decision exchange. Never a game route or permit.
 //! Noise NN supplies ephemeral transport keys; both application identities
 //! authenticate the exact handshake transcript before any decision data flows.
+#[path = "ownerless_decision_recovery.rs"]
+mod recovery;
+
 use super::{
     checkpoint, encoded, identity,
     observation::{private_ip, read_all, remaining, write_all},
@@ -114,6 +117,22 @@ pub enum DecisionCommand {
         review: SyncReview,
         #[arg(long)]
         peer: String,
+    },
+    /// Serve existing durable evidence for a reviewed decision, without casting a vote.
+    ServeRecovery {
+        #[command(flatten)]
+        review: Review,
+        #[arg(long)]
+        from: PeerId,
+        #[arg(long)]
+        bind: SocketAddr,
+    },
+    /// Recover a certified reviewed decision from existing durable votes or a surviving certificate.
+    Recover {
+        #[command(flatten)]
+        review: Review,
+        #[arg(long = "peer", required = true)]
+        peers: Vec<String>,
     },
 }
 
@@ -689,5 +708,7 @@ pub(super) fn run(paths: &DataPaths, command: DecisionCommand) -> Result<()> {
         DecisionCommand::Collect { review, checkpoint, peers } => collect(paths, &review, &checkpoint, &peers),
         DecisionCommand::ServeSync { review, from, bind } => serve_sync(paths, &review, from, bind),
         DecisionCommand::PushSync { review, peer } => push_sync(paths, &review, &peer),
+        DecisionCommand::ServeRecovery { review, from, bind } => recovery::serve(paths, &review, from, bind),
+        DecisionCommand::Recover { review, peers } => recovery::recover(paths, &review, &peers),
     }
 }

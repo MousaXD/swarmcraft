@@ -1344,6 +1344,226 @@ fn encrypted_collection_and_sync_enforce_joint_membership_and_exact_history() {
     f.assert_no_live_storage();
 }
 
+impl Fixture {
+    fn recovery_serve(&self, responder: usize, requester: usize, base: &str, p: &(PathBuf, String)) -> Command {
+        cmd(
+            &self.profiles[responder],
+            &[
+                "decision",
+                "serve-recovery",
+                "--expected-world",
+                &self.world,
+                "--expected-head",
+                base,
+                "--proposal",
+                s(&p.0),
+                "--expected-proposal",
+                &p.1,
+                "--from",
+                &self.identities[requester].peer_id().to_string(),
+                "--bind",
+                "127.0.0.1:0",
+                "--confirm",
+            ],
+        )
+    }
+
+    fn recovery_listener(
+        &self,
+        responder: usize,
+        requester: usize,
+        base: &str,
+        p: &(PathBuf, String),
+    ) -> ObservationListener {
+        use std::io::BufRead;
+        let child = self
+            .recovery_serve(responder, requester, base, p)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut listener = ObservationListener { child: Some(child), address: String::new() };
+        let mut line = String::new();
+        std::io::BufReader::new(listener.child.as_mut().unwrap().stdout.as_mut().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        assert!(!line.is_empty(), "recovery listener failed before readiness");
+        let ready: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(ready["classification"], "ownerless_reference_recovery_listener");
+        assert_eq!(ready["validator"], self.identities[responder].peer_id().to_string());
+        assert_eq!(ready["proposal"], p.1);
+        assert_eq!(ready["runtime_activation"], false);
+        listener.address = ready["address"].as_str().unwrap().to_owned();
+        listener
+    }
+
+    fn decision_recover(&self, requester: usize, base: &str, p: &(PathBuf, String), peers: &[(usize, &str)]) -> Output {
+        let endpoints: Vec<_> = peers.iter().map(|(i, a)| format!("{}@{}", self.identities[*i].peer_id(), a)).collect();
+        let mut args = vec![
+            "decision",
+            "recover",
+            "--expected-world",
+            &self.world,
+            "--expected-head",
+            base,
+            "--proposal",
+            s(&p.0),
+            "--expected-proposal",
+            &p.1,
+            "--confirm",
+        ];
+        for endpoint in &endpoints {
+            args.extend(["--peer", endpoint]);
+        }
+        invoke(&self.profiles[requester], &args)
+    }
+}
+
+#[test]
+fn encrypted_recovery_reconstructs_certificate_after_collector_loss() {
+    use std::net::TcpListener;
+    let f = Fixture::new();
+    let state = f.state("recover-candidate.bin", b"recoverable checkpoint without collector");
+    let p = f.propose(&f.genesis, &f.initial_head, "collector-loss.json", &["--checkpoint", s(&state)]);
+    // Before any votes exist, recovery cannot create one.
+    let before = fs::read(f.journal(1)).unwrap();
+    rejected(f.recovery_serve(1, 2, &f.initial_head, &p).output().unwrap(), "no matching durable recovery evidence");
+    assert_eq!(fs::read(f.journal(1)).unwrap(), before);
+    let a = f.decision_listener(1, 0, &f.initial_head, &p);
+    let b = f.decision_listener(2, 0, &f.initial_head, &p);
+    success(f.decision_collect(0, &f.initial_head, &p, &state, &[(1, &a.address), (2, &b.address)]));
+    success(a.finish());
+    success(b.finish());
+    // Founder/collector is never contacted again.
+    let founder = fs::read(f.journal(0)).unwrap();
+    let a_pending = fs::read(f.journal(1)).unwrap();
+    let b_pending = fs::read(f.journal(2)).unwrap();
+    let unavailable = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = unavailable.local_addr().unwrap().to_string();
+    drop(unavailable);
+    rejected(f.decision_recover(1, &f.initial_head, &p, &[(2, &addr)]), "missing current validator majority");
+    assert_eq!(fs::read(f.journal(1)).unwrap(), a_pending);
+    let listener = f.recovery_listener(2, 1, &f.initial_head, &p);
+    // A live endpoint with the wrong pinned identity cannot provide evidence.
+    rejected(
+        f.decision_recover(1, &f.initial_head, &p, &[(0, &listener.address)]),
+        "missing current validator majority",
+    );
+    assert!(!listener.finish().status.success());
+    assert_eq!(fs::read(f.journal(1)).unwrap(), a_pending);
+    assert_eq!(fs::read(f.journal(2)).unwrap(), b_pending);
+    let listener = f.recovery_listener(2, 1, &f.initial_head, &p);
+    let accepted = success(f.decision_recover(1, &f.initial_head, &p, &[(2, &listener.address)]));
+    success(listener.finish());
+    let history: swarm_protocol::OwnerlessAuthorityHistoryV1 = serde_json::from_slice(&accepted).unwrap();
+    let votes = &history.records.last().unwrap().votes;
+    assert_eq!(votes.len(), 2);
+    for i in [1, 2] {
+        assert!(votes.iter().any(|v| v.validator == f.identities[i].peer_id()));
+    }
+    assert_eq!(json(f.status(1))["head"], p.1);
+    assert_eq!(json(f.status(1))["pending_proposal"], Value::Null);
+    assert_eq!(fs::read(f.journal(2)).unwrap(), b_pending);
+    let accepted_journal = fs::read(f.journal(1)).unwrap();
+    assert_eq!(success(f.decision_recover(1, &f.initial_head, &p, &[(2, &addr)])), accepted);
+    assert_eq!(fs::read(f.journal(1)).unwrap(), accepted_journal);
+    let listener = f.sync_listener(2, 1, &f.initial_head, &p.1);
+    let receipt = json(f.sync_push(1, 2, &f.initial_head, &p.1, &listener.address));
+    success(listener.finish());
+    f.check_sync_receipt(&receipt, 2, &f.initial_head, &p.1, 1, 1);
+    assert_eq!(fs::read(f.journal(0)).unwrap(), founder);
+    f.assert_no_live_storage();
+}
+
+#[test]
+fn encrypted_recovery_accepts_surviving_certificate_without_fresh_votes() {
+    let f = Fixture::new();
+    let state = f.state("certified-candidate.bin", b"surviving certified checkpoint");
+    let p = f.propose(&f.genesis, &f.initial_head, "surviving-certificate.json", &["--checkpoint", s(&state)]);
+    let conflict = f.propose(&f.genesis, &f.initial_head, "different-pending.json", &["--recover"]);
+    f.vote(2, &f.initial_head, &conflict, &f.initial, "conflicting-vote.json");
+    let listener = f.decision_listener(1, 0, &f.initial_head, &p);
+    let original = success(f.decision_collect(0, &f.initial_head, &p, &state, &[(1, &listener.address)]));
+    success(listener.finish());
+    let listener = f.sync_listener(1, 0, &f.initial_head, &p.1);
+    success(f.sync_push(0, 1, &f.initial_head, &p.1, &listener.address));
+    success(listener.finish());
+    let founder = fs::read(f.journal(0)).unwrap();
+    let survivor = fs::read(f.journal(1)).unwrap();
+    let pending = fs::read(f.journal(2)).unwrap();
+    // A wrong proposal cannot be retrieved from the certified profile.
+    rejected(
+        f.recovery_serve(1, 2, &f.initial_head, &conflict).output().unwrap(),
+        "local head is not pinned base or target",
+    );
+    assert_eq!(fs::read(f.journal(2)).unwrap(), pending);
+    let listener = f.recovery_listener(1, 2, &f.initial_head, &p);
+    let recovered = success(f.decision_recover(2, &f.initial_head, &p, &[(1, &listener.address)]));
+    success(listener.finish());
+    assert_eq!(recovered, original);
+    assert_eq!(json(f.status(2))["head"], p.1);
+    assert_eq!(json(f.status(2))["pending_proposal"], Value::Null);
+    assert_eq!(fs::read(f.journal(0)).unwrap(), founder);
+    assert_eq!(fs::read(f.journal(1)).unwrap(), survivor);
+    f.assert_no_live_storage();
+}
+
+#[test]
+fn encrypted_recovery_requires_joint_majority_and_every_entrant() {
+    let f = Fixture::new();
+    let keys: Vec<_> = [1, 2, 3].iter().map(|&i| hex::encode(f.identities[i].public_key())).collect();
+    let p = f.propose(
+        &f.genesis,
+        &f.initial_head,
+        "recovery-joint.json",
+        &["--validator-key", &keys[0], "--validator-key", &keys[1], "--validator-key", &keys[2]],
+    );
+    let a = f.decision_listener(0, 1, &f.initial_head, &p);
+    let b = f.decision_listener(2, 1, &f.initial_head, &p);
+    let entrant = f.decision_listener(3, 1, &f.initial_head, &p);
+    success(f.decision_collect(
+        1,
+        &f.initial_head,
+        &p,
+        &f.initial,
+        &[(0, &a.address), (2, &b.address), (3, &entrant.address)],
+    ));
+    success(a.finish());
+    success(b.finish());
+    success(entrant.finish());
+    let collector = fs::read(f.journal(1)).unwrap();
+    let pending = fs::read(f.journal(2)).unwrap();
+    rejected(f.recovery_serve(3, 0, &f.initial_head, &p).output().unwrap(), "requester must remain in target roster");
+    rejected(
+        f.decision_recover(0, &f.initial_head, &p, &[(2, "127.0.0.1:1")]),
+        "requester must remain in target roster",
+    );
+    let entrant = f.recovery_listener(3, 2, &f.initial_head, &p);
+    rejected(
+        f.decision_recover(2, &f.initial_head, &p, &[(3, &entrant.address)]),
+        "missing current validator majority",
+    );
+    success(entrant.finish());
+    assert_eq!(fs::read(f.journal(2)).unwrap(), pending);
+    let a = f.recovery_listener(0, 2, &f.initial_head, &p);
+    rejected(f.decision_recover(2, &f.initial_head, &p, &[(0, &a.address)]), "missing proposed validator majority");
+    success(a.finish());
+    assert_eq!(fs::read(f.journal(2)).unwrap(), pending);
+    let a = f.recovery_listener(0, 2, &f.initial_head, &p);
+    let entrant = f.recovery_listener(3, 2, &f.initial_head, &p);
+    success(f.decision_recover(2, &f.initial_head, &p, &[(0, &a.address), (3, &entrant.address)]));
+    success(a.finish());
+    success(entrant.finish());
+    assert_eq!(json(f.status(2))["head"], p.1);
+    assert_eq!(json(f.status(2))["reference_fence"], 2);
+    assert_eq!(fs::read(f.journal(1)).unwrap(), collector);
+    let listener = f.sync_listener(3, 2, &f.initial_head, &p.1);
+    success(f.sync_push(2, 3, &f.initial_head, &p.1, &listener.address));
+    success(listener.finish());
+    rejected(f.sync_push(2, 0, &f.initial_head, &p.1, "127.0.0.1:1"), "recipient not in target roster");
+    f.assert_no_live_storage();
+}
+
 impl ObservationListener {
     fn finish(mut self) -> Output {
         self.child.take().unwrap().wait_with_output().unwrap()

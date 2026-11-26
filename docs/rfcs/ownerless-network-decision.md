@@ -163,6 +163,64 @@ has advanced past the target refuses the stale operation. The receipt
 is a historical reference publication acknowledgment, not a freshness
 lease, proof of future availability, or a canonical game permit.
 
+## Recovery after permanent collector loss
+
+The original collector is not a recovery authority. A surviving validator
+can reconstruct the same decision from existing durable signed votes,
+or retrieve a complete certificate from another validator that has
+already accepted it. No new vote is cast during this operation.
+
+Both operators explicitly review the same world, base head, exact
+proposal document and target hash. A requester must be a validator in
+the base and, for a roster transition, must remain in the target
+roster. A responder must be eligible to vote on that reviewed proposal;
+an accepted-target responder must still belong to its target roster.
+A pending old-roster validator may supply its existing vote for a
+joint transition even when that decision removes it. An entrant may
+serve its previously persisted enrollment vote, but cannot initiate
+recovery from a roster to which it does not yet belong.
+
+```sh
+swarmcraft --data-dir /private/validator-b ownerless authority decision serve-recovery \
+  --expected-world "$WORLD" --expected-head "$BASE" \
+  --proposal reviewed.json --expected-proposal "$TARGET" \
+  --from "$VALIDATOR_A" --bind 127.0.0.1:0 --confirm
+
+swarmcraft --data-dir /private/validator-a ownerless authority decision recover \
+  --expected-world "$WORLD" --expected-head "$BASE" \
+  --proposal reviewed.json --expected-proposal "$TARGET" \
+  --peer "$VALIDATOR_B@$ADDRESS" --confirm > recovered-history.json
+```
+
+The recovery Noise domain is distinct from voting and synchronization.
+The responder revalidates its journal and membership under the stable
+lock after authenticating the requester, then sends either its exact
+pending signed vote or the accepted certificate for this exact next
+decision, plus the retained checkpoint bytes. It never signs a vote,
+changes its journal, or discloses evidence from an unrelated proposal.
+An advanced or conflicting accepted head is refused.
+
+Recovery uses the same bounded parallel collection window and distinct
+explicit peer identities/endpoints as collection. It verifies each
+checkpoint commitment and exact byte equality, verifies each
+pending vote against its authenticated voter identity, and verifies
+any returned complete certificate against its independently accepted
+base and exact proposal. It can reconstruct a certificate only from
+already-existing votes meeting the normal current and joint majority
+rules and every entrant's explicit approval. A single surviving
+complete certificate is sufficient for historical acceptance, not
+evidence of a currently available majority. Insufficient evidence
+leaves the requester journal unchanged; only a verified certificate
+can resolve a pending conflict. A retry at the accepted target
+exports the local history, preserving any later pending vote.
+
+Recovery is deliberately scoped to one explicitly identified decision
+from an existing local verified base. No automatic discovery of
+unknown proposals, background recovery service, or reset of a split
+vote is provided. If too few votes or no valid certificate survive,
+the operation fails closed. Subsequent dissemination uses the existing
+certified sync command.
+
 ## Local verification (26 November 2026)
 
 Fourteen authority CLI and two creation CLI scenarios passed on Linux,
@@ -230,14 +288,45 @@ Both new scenarios assert no ordinary live world/control/runtime
 records are created. The results qualify the explicit isolated
 reference workflow only, not physical independent hosts.
 
+### Collector-loss recovery verification (26 November 2026)
+
+All 19 authority CLI and two creation CLI scenarios passed, including
+three new real TCP/process scenarios:
+
+- The founder collected a decision from two other validators and
+  then was never contacted again. The remaining validators rebuilt
+  the certificate solely from their two retained votes and exact
+  checkpoint. Unreachable and wrong-identity endpoints left both
+  pending journals unchanged. The exact recovered history was
+  exported again without a remote connection or journal replacement,
+  then synchronized to the other surviving validator.
+- After one surviving validator received the original certificate,
+  another validator with a conflicting pending vote recovered that
+  complete certificate without fresh votes or any contact with the
+  original collector. Only the certified extension resolved the
+  conflicting lock. The responder and founder journals remained
+  byte-identical.
+- After the collector of a joint transition disappeared, recovery
+  refused a requester removed by the reviewed target. Insufficient
+  old or new majorities failed without changing the pending journal.
+  The surviving old validator, departing validator's existing vote,
+  and entrant's existing enrollment vote formed the exact joint
+  certificate. The reference fence advanced, the entrant received
+  the certified checkpoint, and dissemination to the removed
+  validator was refused.
+
+No ordinary world, control or runtime records were created by these
+scenarios. The collector's absence is modeled by no further process
+or network access to its profile; this is not independent-host failure
+qualification.
+
 The CFT threat model, bounded history and trusted profile/disk
 assumptions remain unchanged. An OS-level key/profile clone or complete
 disk rollback is outside those assumptions. This application binding
 of Noise requires independent protocol review before production use.
 There is no automatic proposer selection, persistent dissemination
-service, automatic certificate recovery from other peers after permanent
-collector loss, canonical Minecraft publication, or game authorization.
-The explicit collection and synchronization commands do not establish
+or recovery service, canonical Minecraft publication, or game authorization.
+The explicit collection, recovery and synchronization commands do not establish
 the globally latest head. An unavailable majority or split
 pending votes can halt decisions. A signed vote is not a lease, an
 attestation of rules-compliant execution, or a write permit. Production
