@@ -89,8 +89,11 @@ class Clients:
             channel = item["channel"]
             result = item["submission"]
             if not lose_ack:
-                if result["op"] == "queued":
-                    result = self.authority.submit(item["player"], item["request"])
+                if result["op"] in ("queued", "committed"):
+                    # Recheck even an already-committed replay at the
+                    # actual send boundary. A guarded authority may have
+                    # lost eligibility or its certified pin since spawn.
+                    result, = self.authority.committed_receipts([(item["player"], item["request"])])
                     require(result["op"] == "committed", "attempt to send uncommitted response")
                 channel.send(result, time.monotonic() + 5)
             channel.close()

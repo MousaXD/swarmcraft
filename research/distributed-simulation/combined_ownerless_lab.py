@@ -24,10 +24,10 @@ from network_lab import cpu_plan, safe_namespace
 from ownerless_permission import PolicyChannel, authority_for, parts, rpc, verify_profile
 from placement_lab import CappedLab, Scope
 from player_runtime import fixture, player_index
-from region_runtime import Rejected, canonical, region_roots, require, world_root
+from region_runtime import Rejected, canonical, digest, region_roots, require, world_root
 from regional_authority import candidate_receipts, wire
 from transition_lab import Clients
-from transition_runtime import DurableRuntime, TransitionAuthority
+from transition_runtime import DurableRuntime, TransitionAuthority, checked_batch, transition_view
 from worker_placement import Offer, assess, evaluate, region_load
 
 CLASSIFICATION = "LOCAL_COMBINED_CFT_REFERENCE_SESSION_NOT_MINECRAFT_NOT_MULTI_HOST"
@@ -91,8 +91,144 @@ def snapshot(mapping, state, tick, audit):
 
 
 def observed_snapshot(ledger, mapping):
-    current = ledger.read()
-    return snapshot(mapping, current["state"], current["tick"], ledger.audit())
+    with ledger.transaction():
+        current = ledger._read()
+        return committed_snapshot(ledger, mapping, current)
+
+
+def committed_snapshot(ledger, mapping, current):
+    """Exact certified bytes from one audited SQLite transaction.
+
+    Pending inputs are local staging, not part of the accepted cut.
+    Audit still validates them; only committed rows enter the snapshot.
+    """
+    journal = ledger._audit(current)
+    committed = {"genesis": journal["genesis"],
+                 "batches": [b for b in journal["batches"] if b["tick"] <= current["tick"]],
+                 "commands": [c for c in journal["commands"] if c["request"]["tick"] <= current["tick"]]}
+    return snapshot(mapping, current["state"], current["tick"], committed)
+
+
+class CertifiedClientGate:
+    """Private reference-client boundary; no live authority or lease.
+
+    The staging ledger remains internal. Every view, command admission
+    and receipt lookup replays one consistent cut and checks its exact
+    bytes against an independently pinned local signed validator journal.
+    Connection identity proof is the caller's responsibility. A local
+    journal check is not a distributed lock across the eventual TCP send.
+    """
+    def __init__(self, ledger, quorum, players):
+        self.ledger = ledger
+        self.quorum = quorum
+        self.world = quorum.world
+        self.binding = quorum.binding
+        players = tuple(players)
+        require(players and all(type(p) is int and p in (0, 1) for p in players)
+                and len(set(players)) == len(players), "invalid reference client roster")
+        self.players = frozenset(players)
+        self.mapping = tuple(quorum.mapping)
+        require(len(self.mapping) == len(set(self.mapping)) == 2 and all(digest(k) for k in self.mapping),
+                "invalid reference player mapping")
+        self.head = dict(quorum.head)
+        self.parent = None
+        current = ledger.read()
+        self.tick = current["tick"]
+        require(parts(self.binding) == (current["world"], self.head["policy_hash"], self.head["compatibility"])
+                and self.world == "scownerless:" + current["world"] == self.head["world_id"],
+                "reference client binding mismatch")
+        verifiers = [v["peer_id"] for v in self.head["validators"] if v["public_key"] == quorum.keys[1]]
+        require(len(verifiers) == 1, "reference verifier not in pinned roster")
+        self.verifier = verifiers[0]
+
+    def save(self):
+        # Clients.spawn needs only the pinned world identifier, not a
+        # staging save. All state-bearing methods below are guarded.
+        return {"world": parts(self.binding)[0]}
+
+    def _verify(self, current, player, head, parent):
+        require(type(player) is int and player in self.players and player in current["players"],
+                "reference client not authorized for this session")
+        require(current["world"] == self.save()["world"], "reference client world changed")
+        candidate = committed_snapshot(self.ledger, list(self.mapping), current)
+        with tempfile.TemporaryDirectory(prefix="sc68-cut-check-") as tmp:
+            path = Path(tmp)/"exact-cut.bin"
+            path.write_bytes(canonical(candidate))
+            args = ["verify-reference-cut", "--expected-world", self.world,
+                    "--expected-head", head["head"], "--expected-fence", head["reference_fence"],
+                    "--expected-policy", head["policy_hash"], "--expected-compatibility", head["compatibility"],
+                    "--checkpoint", path, "--player-key", self.mapping[player]]
+            if parent is not None:
+                args += ["--expected-parent", parent]
+            # Slot 1 is the explicitly selected local surviving validator
+            # in this disposable reference fixture, not a founder privilege.
+            result = self.quorum.auth(1, *args)
+        require(result["classification"] == "verified_local_ownerless_reference_cut"
+                and all(result[k] == head[k] for k in ("world_id", "head", "sequence", "reference_fence",
+                                                       "checkpoint", "policy_hash", "compatibility"))
+                and result["exact_reference_cut_verified"] is True
+                and result["checkpoint_transition_verified"] is (parent is not None)
+                and result["expected_parent"] == parent and result["player_key"] == self.mapping[player]
+                and result["reference_player_eligible"] is True and result["local_validator"] is True
+                and result["local_identity"] == self.verifier
+                and result["pending_proposal"] is None
+                and all(result[k] is False for k in ("freshness_lease", "canonical_authority", "write_authority",
+                    "live_quorum_verified", "runtime_activation", "player_admission", "worker_admission",
+                    "v1_canonical_world_created")), "reference publication verification mismatch")
+        return result, candidate
+
+    def view(self, player):
+        with self.ledger.transaction():
+            current = self.ledger._read()
+            require(current["tick"] == self.tick, "uncertified staged tick")
+            self._verify(current, player, self.head, self.parent)
+            return transition_view(current["world"], current["tick"], current["cut_root"],
+                                   current["state"], current["players"], player)
+
+    def submit(self, player, request):
+        with self.ledger.transaction(write=True):
+            current = self.ledger._read()
+            require(current["tick"] == self.tick, "uncertified staged tick")
+            self._verify(current, player, self.head, self.parent)
+            return self.ledger._submit_locked(current, player, request)
+
+    def committed_receipts(self, inputs):
+        """Release only exact results from the certified, independently audited cut.
+
+        Never enqueue on receipt lookup, even if a request was never seen.
+        A later eligible session may read an exact historical receipt already
+        included in the current certified checkpoint.
+        """
+        with self.ledger.transaction():
+            current = self.ledger._read()
+            require(current["tick"] == self.tick, "uncertified staged tick")
+            rows = checked_batch(inputs, current)
+            results = []
+            for player, request in rows:
+                _, candidate = self._verify(current, player, self.head, self.parent)
+                matches = [row["response"] for row in candidate["transaction_journal"]["commands"]
+                           if row["player"] == player and row["request"] == request]
+                require(len(matches) == 1 and matches[0]["op"] == "committed",
+                        "no exact certified command receipt")
+                results.append(matches[0])
+            return results
+
+    def publish(self, accepted):
+        # Only a direct same-fence checkpoint extension may change the
+        # pin of an existing session. Governance changes require a new
+        # session and newly verified role proofs.
+        require(accepted["sequence"] == self.head["sequence"] + 1
+                and accepted["head"] != self.head["head"]
+                and all(accepted[k] == self.head[k] for k in ("world_id", "policy_hash", "compatibility",
+                                                               "reference_fence")), "invalid reference publication transition")
+        parent = self.head["head"]
+        with self.ledger.transaction():
+            current = self.ledger._read()
+            require(current["tick"] == self.tick + 1, "reference publication must certify exactly the next tick")
+            checks = [self._verify(current, p, accepted, parent)[0] for p in sorted(self.players)]
+            tick = current["tick"]
+        self.head, self.parent, self.tick = dict(accepted), parent, tick
+        return checks
 
 
 class Quorum:
@@ -351,7 +487,8 @@ def run(cli, scope, cpus, temp, report):
                                   for i,(o,subject) in enumerate(offers)]
             evidence["pre_kernel"] = [lab.observe(i) for i in range(len(offers))]
             scope.recheck(evidence["pre_kernel"])
-            with Clients(ledger) as clients:
+            gate = CertifiedClientGate(ledger, quorum, [p for p,_ in players])
+            with Clients(gate) as clients:
                 for player,_ in players:
                     request = {"op":"act","world":before["world"],"id":secrets.token_hex(32),
                                "tick":before["tick"]+1,"parent":before["cut_root"],
@@ -360,6 +497,19 @@ def run(cli, scope, cpus, temp, report):
                 require(all(item["submission"]["op"] == "queued" for item in clients.sessions),
                         "unexpected unsealed input result")
                 runtime.advance()
+                # Prove the actual client boundary refuses a local FULL
+                # commit until the independent authority accepts it.
+                for item in clients.sessions:
+                    for attempt in (lambda: gate.view(item["player"]),
+                                    lambda: gate.submit(item["player"], item["request"]),
+                                    lambda: gate.committed_receipts([(item["player"], item["request"])])):
+                        try:
+                            attempt()
+                        except Rejected as error:
+                            require(str(error) == "uncertified staged tick", "wrong publication refusal")
+                        else:
+                            raise Rejected("uncertified client data escaped")
+                evidence["uncertified_client_access_refused"] = True
                 evidence["post_kernel"] = [lab.observe(i) for i in range(len(offers))]
                 scope.recheck(evidence["post_kernel"])
                 retired_receipts = candidate_receipts(runtime.runtime.coordinator)
@@ -374,6 +524,7 @@ def run(cli, scope, cpus, temp, report):
                 require(accepted["head"] != prior_head, "no certified extension")
                 quorum.assert_state(candidate)
                 evidence["accepted_head"] = accepted["head"]
+                evidence["publication_checks"] = gate.publish(accepted)
                 evidence["clients"] = clients.finish()
                 require(all(row["observed"]["reply"]["op"] == "committed" for row in evidence["clients"]),
                         "client acknowledgement did not follow certification")
@@ -441,7 +592,7 @@ def main():
     coordinator,cpus,affinity = cpu_plan()
     scope = Scope(affinity)
     os.sched_setaffinity(0,{coordinator})
-    report = {"schema":1,"classification":CLASSIFICATION,"physical_machines":1,"live_minecraft_players":0,
+    report = {"schema":2,"classification":CLASSIFICATION,"physical_machines":1,"live_minecraft_players":0,
               "canonical_minecraft_authority":False,"runtime_activation":False,"actual_kernel_caps":True,
               "artifact_manifest":artifact_manifest(a.cli),"stages":[]}
     try:

@@ -838,6 +838,132 @@ fn participation_challenge_is_single_use_across_processes_and_output_failure() {
     f.assert_no_live_storage();
 }
 
+impl Fixture {
+    fn verify_reference_cut(
+        &self,
+        verifier: usize,
+        pin: &Value,
+        state: &Path,
+        player: usize,
+        parent: Option<&str>,
+    ) -> Output {
+        let fence = pin["reference_fence"].as_u64().unwrap().to_string();
+        let player_key = hex::encode(self.identities[player].public_key());
+        let mut args = vec![
+            "verify-reference-cut",
+            "--expected-world",
+            &self.world,
+            "--expected-head",
+            pin["head"].as_str().unwrap(),
+            "--expected-fence",
+            &fence,
+            "--expected-policy",
+            pin["policy_hash"].as_str().unwrap(),
+            "--expected-compatibility",
+            pin["compatibility"].as_str().unwrap(),
+            "--checkpoint",
+            s(state),
+            "--player-key",
+            &player_key,
+        ];
+        if let Some(parent) = parent {
+            args.extend(["--expected-parent", parent]);
+        }
+        invoke(&self.profiles[verifier], &args)
+    }
+}
+
+#[test]
+fn reference_publication_requires_exact_durable_cut_fence_and_private_eligibility() {
+    let f = Fixture::new();
+    let player = hex::encode(f.identities[3].public_key());
+    let genesis = json(f.status(1));
+    rejected(f.verify_reference_cut(1, &genesis, &f.initial, 3, None), "no accepted private invitation");
+    let invite = f.role_propose(
+        &f.genesis,
+        &f.initial_head,
+        "cut-invite.json",
+        &["propose-player", "--player-key", &player, "--allow"],
+    );
+    let h1 = f.commit_role(&f.genesis, &f.initial_head, &invite, "cut-invite-history.json", 1, 2);
+    let base = json(f.status(1));
+    let before = fs::read(f.journal(1)).unwrap();
+    let result = json(f.verify_reference_cut(1, &base, &f.initial, 3, None));
+    assert_eq!(result["classification"], "verified_local_ownerless_reference_cut");
+    assert_eq!(result["exact_reference_cut_verified"], true);
+    assert_eq!(result["checkpoint_transition_verified"], false);
+    assert_eq!(result["reference_player_eligible"], true);
+    assert_eq!(result["player_key"], player);
+    for key in [
+        "live_quorum_verified",
+        "freshness_lease",
+        "canonical_authority",
+        "write_authority",
+        "runtime_activation",
+        "player_admission",
+        "worker_admission",
+        "v1_canonical_world_created",
+    ] {
+        assert_eq!(result[key], false, "{key}");
+    }
+    assert_eq!(fs::read(f.journal(1)).unwrap(), before);
+    rejected(f.verify_reference_cut(3, &base, &f.initial, 3, None), "not a current validator");
+    rejected(f.verify_reference_cut(1, &base, &f.initial, 4, None), "no accepted private invitation");
+    rejected(
+        f.verify_reference_cut(1, &base, &f.initial, 3, Some(&f.initial_head)),
+        "not the exact checkpoint transition",
+    );
+    for (field, replacement) in [
+        ("reference_fence", serde_json::json!(3)),
+        ("policy_hash", serde_json::json!("a".repeat(64))),
+        ("compatibility", serde_json::json!("b".repeat(64))),
+    ] {
+        let mut wrong = base.clone();
+        wrong[field] = replacement;
+        rejected(f.verify_reference_cut(1, &wrong, &f.initial, 3, None), "fence or policy/compatibility pin differs");
+    }
+    let state = f.state("cut-next.bin", b"exact replay-checked candidate fixture");
+    rejected(f.verify_reference_cut(1, &base, &state, 3, None), "checkpoint bytes do not match commitment");
+    let proposal = f.propose(&h1, &invite.1, "cut-next.json", &["--checkpoint", s(&state)]);
+    let a = f.vote(1, &invite.1, &proposal, &state, "cut-next-a.json");
+    let pending = fs::read(f.journal(1)).unwrap();
+    rejected(f.verify_reference_cut(1, &base, &f.initial, 3, None), "pending governance vote");
+    assert_eq!(fs::read(f.journal(1)).unwrap(), pending);
+    let b = f.vote(2, &invite.1, &proposal, &state, "cut-next-b.json");
+    let h2 = f.certified(&h1, &invite.1, &proposal, &[&a, &b], "cut-next-history.json");
+    f.sync(&[1, 2, 3, 4], &h2, &proposal.1, &state, 2, 2);
+    let accepted = json(f.status(1));
+    let result = json(f.verify_reference_cut(1, &accepted, &state, 3, Some(&invite.1)));
+    assert_eq!(result["checkpoint_transition_verified"], true);
+    assert_eq!(result["expected_parent"], invite.1);
+    rejected(
+        f.verify_reference_cut(1, &accepted, &state, 3, Some(&f.initial_head)),
+        "not the exact checkpoint transition",
+    );
+    rejected(f.verify_reference_cut(1, &base, &f.initial, 3, None), "differs from expected pin");
+    rejected(f.verify_reference_cut(1, &accepted, &f.initial, 3, None), "checkpoint bytes do not match commitment");
+    // A newer signed revocation is not a checkpoint transition and may
+    // not preserve the old invitation merely because its bytes match.
+    let revoke =
+        f.role_propose(&h2, &proposal.1, "cut-revoke.json", &["propose-player", "--player-key", &player, "--revoke"]);
+    let a = f.vote(1, &proposal.1, &revoke, &state, "cut-revoke-a.json");
+    let b = f.vote(2, &proposal.1, &revoke, &state, "cut-revoke-b.json");
+    let h3 = f.certified(&h2, &proposal.1, &revoke, &[&a, &b], "cut-revoke-history.json");
+    f.sync(&[1, 2], &h3, &revoke.1, &state, 3, 3);
+    rejected(f.verify_reference_cut(1, &accepted, &state, 3, Some(&invite.1)), "differs from expected pin");
+    let revoked = json(f.status(1));
+    rejected(f.verify_reference_cut(1, &revoked, &state, 3, None), "no accepted private invitation");
+    f.assert_no_live_storage();
+}
+
+#[test]
+fn reference_publication_adapter_rejects_public_reference_mode() {
+    let f = Fixture::with_mode(true);
+    let head = json(f.status(1));
+    rejected(f.verify_reference_cut(1, &head, &f.initial, 3, None), "requires private participation");
+    f.assert_no_live_storage();
+}
+
 struct ObservationListener {
     child: Option<std::process::Child>,
     address: String,

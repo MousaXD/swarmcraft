@@ -142,6 +142,14 @@ run has three certified reference ticks and 13 decisions. This does
 not satisfy actual independent-machine Minecraft gameplay or the #63
 sustained-service target; production activation remains gated.
 
+The certified-client-boundary follow-up in the same report adds
+an exact signed local checkpoint check for every reference view,
+input and receipt lookup, and refuses uncertified staging after
+reopen. Schema-2 evidence verifies three ticks, 13 decisions, four
+per-player publication checks and four client receipts, with all
+three stages refusing uncertified client access. No live quorum,
+canonical Minecraft publication or freshness lease is asserted.
+
 ## Original R0 evidence (2026-11-08)
 
 

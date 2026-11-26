@@ -18,6 +18,32 @@ class CombinedEvidenceTests(unittest.TestCase):
         self.assertEqual(verify_observations(self.data),
                          {"ticks":3,"decisions":13,"workers":4,"client_receipts":4,"role_proofs":9})
 
+    def test_retained_certified_gate_run_and_mutations(self):
+        data = json.loads((Path(__file__).parent/"evidence"/
+                           "2026-11-26-combined-certified-gate.json").read_bytes())
+        self.assertEqual(data["schema"],2)
+        self.assertEqual(verify_observations(data),
+                         {"ticks":3,"decisions":13,"workers":4,"client_receipts":4,"role_proofs":9})
+        for mutate in (
+            lambda r:r.update(schema=1),
+            lambda r:r.update(schema=True),
+            lambda r:r["stages"][0].pop("publication_checks"),
+            lambda r:r["stages"][0]["publication_checks"].pop(),
+            lambda r:r["stages"][0].update(uncertified_client_access_refused=False),
+            lambda r:r["stages"][1]["publication_checks"][0].update(expected_parent="0"*64),
+            lambda r:r["stages"][1]["publication_checks"][0].update(reference_fence=0),
+            lambda r:r["stages"][1]["publication_checks"][0].update(checkpoint="0"*64),
+            lambda r:r["stages"][1]["publication_checks"][0].update(player_key=r["participant_keys"][0]),
+            lambda r:r["stages"][2]["publication_checks"][0].update(local_validator=False),
+            lambda r:r["stages"][2]["publication_checks"][0].update(pending_proposal="a"*64),
+            lambda r:r["stages"][2]["publication_checks"][0].update(freshness_lease=True),
+            lambda r:r["stages"][2]["publication_checks"][0].update(write_authority=True),
+        ):
+            altered = copy.deepcopy(data)
+            mutate(altered)
+            with self.assertRaises(Rejected):
+                verify_observations(altered)
+
     def test_reject_incorrect_claims_and_state(self):
         for mutate in (
             lambda r:r.update(physical_machines=2),

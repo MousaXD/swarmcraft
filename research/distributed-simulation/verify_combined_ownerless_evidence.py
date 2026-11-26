@@ -40,7 +40,7 @@ def hexbytes(value, size=32):
 
 
 def verify_observations(data):
-    require(data["schema"] == 1 and data["classification"] == CLASSIFICATION
+    require(type(data["schema"]) is int and data["schema"] in (1, 2) and data["classification"] == CLASSIFICATION
             and data["physical_machines"] == 1 and data["live_minecraft_players"] == 0
             and data["canonical_minecraft_authority"] is False and data["runtime_activation"] is False
             and data["actual_kernel_caps"] is True and data["all_workers_exited"] is True
@@ -168,6 +168,25 @@ def verify_observations(data):
                 and stage["base_head"] == heads[base]["head"] and stage["accepted_head"] == heads[accepted]["head"]
                 and stage["worker_cleanup"] is True and stage["all_worker_privilege_requests_refused"] is True,
                 "wrong stage observations")
+        if data["schema"] == 2:
+            require(stage.get("uncertified_client_access_refused") is True,
+                    "missing uncertified-client refusal")
+            checks = stage.get("publication_checks")
+            require(isinstance(checks,list) and len(checks) == len(players),
+                    "missing certified publication checks")
+            for check, (_, subject) in zip(checks,players):
+                expected = {**heads[accepted],
+                            "classification":"verified_local_ownerless_reference_cut",
+                            "exact_reference_cut_verified":True,"checkpoint_transition_verified":True,
+                            "expected_parent":heads[base]["head"],"reference_player_eligible":True,
+                            "player_key":keys[subject],"local_identity":"scpeer:"+ids[keys[1]],
+                            "local_validator":True,"pending_proposal":None,
+                            "canonical_authority":False,"write_authority":False,
+                            "worker_admission":False,"freshness_lease":False}
+                require(same(check,expected),"publication check differs from exact certified cut")
+        else:
+            require("publication_checks" not in stage and "uncertified_client_access_refused" not in stage,
+                    "guarded publication observations require schema 2")
         require(before["world"] == after["world"] == world and before["tick"] == tick-1
                 and before["runtime_root"] == root and before["cut_root"] == cut
                 and same(before["regions"],wire(state)) and (prior_save is None or before == prior_save),

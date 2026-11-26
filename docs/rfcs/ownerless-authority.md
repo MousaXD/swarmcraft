@@ -150,6 +150,18 @@ The [#67 participation contract](ownerless-participation.md) appends separate
 majority-certified private invitations and worker caps to this history.
 Existing checkpoint/recovery/reconfiguration encodings are unchanged.
 
+The private reference-only `verify-reference-cut` operation checks an
+independently pinned exact local head/fence/policy/compatibility and
+checkpoint against the signed journal under its stable lock. It refuses
+pending votes, nonvalidator verifiers and absent private invitations;
+optionally it requires the exact immediate checkpoint parent at the
+same fence. It does not authenticate the supplied participant key or
+grant authority. The [combined reference client gate](
+../../research/distributed-simulation/COMBINED_OWNERLESS_REPORT.md#certified-checkpoint-client-boundary-follow-up)
+uses it to withhold staged state and receipts, including on database
+reopen. This is not a live freshness lease or a distributed atomic
+publication transaction.
+
 ## CFT and remaining gates
 
 This is not Byzantine consensus. Valid signatures alone cannot detect

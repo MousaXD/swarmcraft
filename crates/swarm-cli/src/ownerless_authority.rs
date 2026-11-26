@@ -142,6 +142,28 @@ pub enum AuthorityCommand {
         #[arg(long)]
         expected_world: OwnerlessWorldIdV1,
     },
+    /// Verify exact staged bytes against the locally accepted private reference cut.
+    /// This is a historical check, not a lease, authentication, or runtime permit.
+    VerifyReferenceCut {
+        #[arg(long)]
+        expected_world: OwnerlessWorldIdV1,
+        #[arg(long)]
+        expected_head: Hash32,
+        #[arg(long)]
+        expected_fence: u64,
+        #[arg(long)]
+        expected_policy: Hash32,
+        #[arg(long)]
+        expected_compatibility: Hash32,
+        /// If present, require the current head to be its immediate checkpoint decision.
+        #[arg(long)]
+        expected_parent: Option<Hash32>,
+        #[arg(long)]
+        checkpoint: PathBuf,
+        /// Already authenticated reference participant, not a network credential.
+        #[arg(long)]
+        player_key: String,
+    },
     /// Export the local accepted proof, not a fresh authority lease.
     ExportHistory {
         #[arg(long)]
@@ -679,6 +701,72 @@ pub fn run(paths: &DataPaths, command: AuthorityCommand) -> Result<()> {
             let store = Store::open(paths, expected_world)?;
             let (journal, head) = store.load(expected_world)?;
             print(&report(&head, Some(&journal)), MAX_OWNERLESS_DOCUMENT_BYTES)
+        }
+        VerifyReferenceCut {
+            expected_world,
+            expected_head,
+            expected_fence,
+            expected_policy,
+            expected_compatibility,
+            expected_parent,
+            checkpoint: file,
+            player_key,
+        } => {
+            use swarm_protocol::{OwnerlessParticipantV1, OwnerlessParticipationMode};
+            let store = Store::try_open(paths, expected_world)?;
+            let (journal, head) = store.load(expected_world)?;
+            pin(&head, expected_head)?;
+            ensure!(
+                head.fence() == expected_fence
+                    && head.policy() == expected_policy
+                    && head.compatibility() == expected_compatibility,
+                "reference publication fence or policy/compatibility pin differs"
+            );
+            ensure!(journal.pending.is_none(), "pending governance vote prevents reference publication check");
+            ensure!(
+                head.validators()
+                    .iter()
+                    .any(|v| v.peer_id == store.identity.peer_id() && v.public_key == store.identity.public_key()),
+                "reference publication verifier is not a current validator"
+            );
+            // This adapter is deliberately private-only. The supplied
+            // public key is an independently mapped connection identity;
+            // checking eligibility is not proving possession of the key.
+            ensure!(
+                head.participation_mode() == OwnerlessParticipationMode::InviteOnly,
+                "reference publication adapter requires private participation"
+            );
+            ensure!(player_key.len() == 64, "invalid reference player key");
+            let key: [u8; 32] =
+                hex::decode(&player_key)?.try_into().map_err(|_| anyhow::anyhow!("invalid reference player key"))?;
+            ensure!(
+                head.invited_players().contains(&OwnerlessParticipantV1::from_key(key)),
+                "reference player has no accepted private invitation"
+            );
+            if let Some(parent) = expected_parent {
+                let last = journal.history.records.last().context("no certified checkpoint transition")?;
+                ensure!(
+                    last.proposal.parent == parent
+                        && last.proposal.base_fence == expected_fence
+                        && matches!(last.proposal.action, OwnerlessAuthorityActionV1::Checkpoint { commitment }
+                            if commitment == head.checkpoint()),
+                    "reference publication is not the exact checkpoint transition"
+                );
+            }
+            let bytes = checkpoint(&file, head.checkpoint())?;
+            ensure!(store.state(head.checkpoint())? == bytes, "reference publication differs from durable bytes");
+            let mut result = report(&head, Some(&journal));
+            result["classification"] = "verified_local_ownerless_reference_cut".into();
+            result["exact_reference_cut_verified"] = true.into();
+            result["checkpoint_transition_verified"] = expected_parent.is_some().into();
+            result["expected_parent"] = expected_parent.map(|p| p.to_string()).into();
+            result["reference_player_eligible"] = true.into();
+            result["player_key"] = hex::encode(key).into();
+            result["canonical_authority"] = false.into();
+            result["write_authority"] = false.into();
+            result["worker_admission"] = false.into();
+            result["freshness_lease"] = false.into();
+            print(&result, MAX_OWNERLESS_DOCUMENT_BYTES)
         }
         ExportHistory { expected_world } => {
             let store = Store::open(paths, expected_world)?;
