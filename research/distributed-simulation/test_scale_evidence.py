@@ -182,6 +182,22 @@ class RetainedEvidenceTests(unittest.TestCase):
         self.assertEqual(result["qualified_runs"],0)
         self.assertEqual(result["transactions"],{"write":4138,"read":4138,"commit":8276,"rollback":0})
 
+    def test_candidate_reuse_matrix(self):
+        path=Path(__file__).parent/"evidence"/"2026-11-26-scale-reuse.json"
+        report=json.loads(path.read_text())
+        result=verify(report)
+        self.assertEqual(result["candidate_mode"],"reuse")
+        self.assertEqual(result["transaction_counts"],"boundary")
+        self.assertEqual(result["runs"],24)
+        self.assertEqual(result["accepted_ticks"],2834)
+        self.assertEqual(result["within_window_ticks"],2818)
+        self.assertEqual(result["client_commands"],5668)
+        self.assertEqual(result["qualified_runs"],5)
+        self.assertEqual(result["transactions"],{"write":5668,"read":5668,"commit":11336,"rollback":0})
+        for field,value in (("candidate_mode","unknown"),("transaction_counts","unknown")):
+            with self.assertRaises(Rejected):
+                verify({**report,field:value})
+
 
 if __name__=="__main__":
     unittest.main()

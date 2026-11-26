@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import json
 from pathlib import Path
 import sqlite3
@@ -145,13 +146,101 @@ class AuthorityTests(unittest.TestCase):
             _, receipts = self.candidate()
             self.ledger.commit(receipts)
             self.assertEqual(self.ledger.read()["state"], serial_step(fixture(), 1))
-            # One complete candidate validation and one decode of the
-            # newly persisted BLOB. Further reads must reuse that BLOB.
-            calls = validate.call_count
-            self.assertGreaterEqual(calls, 2)
+            # The candidate is already parsed and globally verified.
+            # A successful commit seeds the exact-BLOB cache directly.
+            self.assertEqual(validate.call_count, 0)
             self.ledger.save()
             self.ledger.history()
-            self.assertEqual(validate.call_count, calls)
+            self.assertEqual(validate.call_count, 0)
+
+    def test_candidate_parsed_once_and_exact_receipt_hash_preserved(self):
+        from region_runtime import REGIONS, read_region
+        _, receipts = self.candidate()
+        expected_hash = hashlib.sha256(canonical(sorted(
+            receipts, key=lambda r:r["body"]["session"]))).hexdigest()
+        with patch("regional_authority.read_region", wraps=read_region) as parse:
+            committed = self.ledger.commit(list(reversed(receipts)))
+            self.assertEqual(committed["receipt_hash"], expected_hash)
+            self.assertEqual(parse.call_count, REGIONS)
+            self.assertEqual(self.ledger.read()["state"], serial_step(fixture(), 1))
+            self.assertEqual(parse.call_count, REGIONS)
+        # Receipt containers are caller-owned. Mutating them after commit
+        # cannot alter any cached Region or persisted BLOB.
+        receipts[0]["body"]["regions"].clear()
+        self.assertEqual(self.ledger.read()["state"], serial_step(fixture(), 1))
+        reopened = Authority(self.path)
+        try:
+            self.assertEqual(reopened.save(), self.ledger.save())
+            self.assertEqual(reopened.history(), self.ledger.history())
+        finally:
+            reopened.close()
+
+    def test_reparse_control_and_candidate_cache_invalidation(self):
+        from region_runtime import REGIONS, read_region
+        _, receipts = self.candidate()
+        self.ledger.reuse_validated_candidate = False
+        with patch("regional_authority.read_region", wraps=read_region) as parse:
+            self.ledger.commit(receipts)
+            self.assertEqual(parse.call_count, REGIONS * 2)
+            self.ledger.read()
+            self.assertEqual(parse.call_count, REGIONS * 3)
+        self.ledger.reuse_validated_candidate = True
+        current = self.ledger.read()
+        self.ledger.rotate(current["generation"], current["tick"], current["runtime_root"], GROUPS)
+        _, receipts = self.candidate()
+        self.ledger.commit(receipts)
+        expected = self.ledger.read()["state"]
+        with sqlite3.connect(self.path) as other:
+            raw, = other.execute("SELECT state FROM world WHERE singleton=1").fetchone()
+            changed = json.loads(raw)
+            changed[0][1][0] = (changed[0][1][0] + 1) % 256
+            other.execute("UPDATE world SET state=?", (canonical(changed),))
+            other.commit()
+            with self.assertRaisesRegex(Rejected, "invalid persisted cut"):
+                self.ledger.read()
+            other.execute("UPDATE world SET state=?", (raw,))
+            other.commit()
+        self.assertEqual(self.ledger.read()["state"], expected)
+
+    def test_candidate_reuse_still_refuses_malformed_and_duplicate_global_ids(self):
+        _, receipts = self.candidate()
+        grants = {g["session"]:g for g in self.ledger.read()["grants"]}
+        for mutation in ("bad_position", "bad_integer", "duplicate_global"):
+            bad = json.loads(canonical(receipts))
+            populated = [region for receipt in bad for region in receipt["body"]["regions"] if region[3]]
+            self.assertGreaterEqual(len(populated), 2)
+            region = populated[0]
+            if mutation == "bad_position":
+                region[3][0][1] = -1
+            elif mutation == "bad_integer":
+                region[3][0][2] = True
+            else:
+                other = populated[1]
+                region[3][0][0] = other[3][0][0]
+                region[3].sort(key=lambda a:a[0])
+            for receipt in bad:
+                receipt["mac"] = tag(grants[receipt["body"]["session"]]["key"], receipt["body"])
+            self.assert_refused(bad)
+        self.ledger.commit(receipts)
+        self.assertEqual(self.ledger.read()["state"], serial_step(fixture(), 1))
+
+    def test_boundary_observer_matches_sql_and_reports_rollback(self):
+        from scale_profile import PhaseClock
+        trace, boundary = PhaseClock(), PhaseClock()
+        self.ledger.db.set_trace_callback(trace.trace)
+        self.ledger.transaction_event = boundary.boundary
+        try:
+            trace.begin()
+            boundary.begin()
+            self.ledger.read()
+            with self.assertRaises(RuntimeError):
+                with self.ledger.transaction(write=True):
+                    raise RuntimeError("injected failure")
+            self.assertEqual(trace.transactions, boundary.transactions)
+            self.assertEqual(boundary.transactions, {"write":1,"read":1,"commit":1,"rollback":1})
+        finally:
+            self.ledger.db.set_trace_callback(None)
+            self.ledger.transaction_event = None
 
     def test_state_cache_rechecks_other_connection_mutations(self):
         baseline = self.ledger.save()

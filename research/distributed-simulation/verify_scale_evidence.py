@@ -194,14 +194,18 @@ def verify_run(row,scenario,repeat,count,hardware,states,roots,profile=False,inp
 
 def verify(data):
     require(isinstance(data,dict),"invalid benchmark receipt")
-    profile=data.get("schema") in (2,3)
-    batched_schema=data.get("schema")==3
+    profile=data.get("schema") in (2,3,4)
+    batched_schema=data.get("schema") in (3,4)
+    candidate_schema=data.get("schema")==4
     fields(data,"schema","classification","completed","period_ns","window_ns","repeats","hardware","runs",
            *("state_cache",) if profile else (),
-           *("input_mode",) if batched_schema else ())
-    require(type(data["schema"]) is int and data["schema"] in (1,2,3)
+           *("input_mode",) if batched_schema else (),
+           *("candidate_mode","transaction_counts") if candidate_schema else ())
+    require(type(data["schema"]) is int and data["schema"] in (1,2,3,4)
             and (not profile or data["state_cache"] in ("cached","uncached"))
             and (not batched_schema or data["input_mode"] in ("batched","individual"))
+            and (not candidate_schema or (data["candidate_mode"] in ("reuse","reparse")
+                 and data["transaction_counts"] in ("boundary","trace")))
             and data["classification"]==CLASSIFICATION and data["completed"] is True
             and data["period_ns"]==PERIOD_NS and data["window_ns"]==WINDOW_NS and data["repeats"]==REPEATS,
             "incomplete or misclassified benchmark")
@@ -234,6 +238,9 @@ def verify(data):
         result["input_mode"]=data["input_mode"]
         result["transactions"]={k:sum(t["transactions"][k] for r in data["runs"] for t in r["ticks"])
                                 for k in ("write","read","commit","rollback")}
+    if candidate_schema:
+        result["candidate_mode"]=data["candidate_mode"]
+        result["transaction_counts"]=data["transaction_counts"]
     return result
 
 

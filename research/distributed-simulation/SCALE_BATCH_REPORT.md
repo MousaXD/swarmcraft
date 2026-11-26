@@ -156,7 +156,8 @@ systemd-run --user --scope --quiet \
   bash scripts/e2e/linux_cgroup_memory_gate.sh \
   unshare --user --map-root-user --net \
   python3 research/distributed-simulation/scale_lab.py \
-  --state-cache cached --input-mode "$mode" --output "/tmp/sc63-$mode-new.json"
+  --state-cache cached --input-mode "$mode" --candidate-mode reparse \
+  --transaction-counts trace --output "/tmp/sc63-$mode-new.json"
 cd research/distributed-simulation
 python3 verify_scale_evidence.py "/tmp/sc63-$mode-new.json"
 python3 -m unittest discover -s . -p 'test_*.py' -v

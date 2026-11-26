@@ -29,6 +29,15 @@ MAX_GENERATION = 1_000_000
 
 def validated_state(rows):
     regions = [read_region(row) for row in sequence(rows, REGIONS, REGIONS)]
+    return _assembled_state(regions)
+
+
+def _assembled_state(regions):
+    """Global validation of regions already parsed by read_region.
+
+    Only internal callers with freshly validated, immutable Regions may
+    use this helper. It is not an alternate untrusted input parser.
+    """
     require([r.rid for r in regions] == list(range(REGIONS)), "incomplete or unordered world")
     ids = sorted(a[0] for r in regions for a in r.agents)
     require(len(ids) == len(set(ids)) <= MAX_AGENTS, "duplicate or excessive world identities")
@@ -121,6 +130,7 @@ class Authority:
     app_id = APP_ID
     schema = SCHEMA
     ruleset = RULESET
+    reuse_validated_candidate = True
 
     @staticmethod
     def cut(world, tick, root, players):
@@ -146,6 +156,7 @@ class Authority:
         # Never cache metadata, grants, journal decisions, or DB transactions.
         self._state_cache = None
         self.phase = nullcontext  # optional benchmark-only timing context
+        self.transaction_event = None  # optional boundary-only benchmark observer
         # mode=rw: missing authority is NOT an empty new world.
         self.db = sqlite3.connect(self.path.as_uri() + "?mode=rw", uri=True,
                                   isolation_level=None, timeout=5)
@@ -220,13 +231,23 @@ class Authority:
         with self.phase("sqlite_begin"):
             self.db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
         try:
+            if self.transaction_event is not None:
+                self.transaction_event("write" if write else "read")
             yield
             with self.phase("sqlite_durable_commit" if write else "sqlite_read_commit"):
                 self.db.execute("COMMIT")
+            if self.transaction_event is not None:
+                self.transaction_event("commit")
         except BaseException:
             if self.db.in_transaction:
                 self.db.execute("ROLLBACK")
+                if self.transaction_event is not None:
+                    self.transaction_event("rollback")
             raise
+
+    def _remember_state(self, raw, state, ids, rows):
+        self._state_cache = (raw, tuple(state.items()), tuple(ids),
+                             tuple(tuple(row) for row in rows))
 
     def _decode_state(self, raw):
         with self.phase("state_decode_roots"):
@@ -237,9 +258,8 @@ class Authority:
                 # read_region returns frozen Regions with nested tuples;
                 # keep only immutable objects and never share a mutable
                 # dictionary, ID list or summary list with the caller.
-                cached = (raw, tuple(state.items()), tuple(ids),
-                          tuple(tuple(row) for row in rows))
-                self._state_cache = cached
+                self._remember_state(raw, state, ids, rows)
+                cached = self._state_cache
             return dict(cached[1]), list(cached[2]), cached[3]
 
     def _read(self):
@@ -367,14 +387,22 @@ class Authority:
                 require(candidate is None or candidate == body["runtime_root"], "conflicting cut")
                 candidate = body["runtime_root"]
             require(seen == set(grants), "incomplete current receipt set")
-            state, ids = validated_state(wire(regions))
+            # Every region above was decoded exactly once from a receipt
+            # authenticated against its current exclusive grant. Repeating
+            # read_region on its immutable wire form cannot add validation.
+            # Global coverage, ordering, identity uniqueness and limits
+            # still run on the complete set, independently of the workers.
+            if self.reuse_validated_candidate:
+                state, ids = _assembled_state([regions[r] for r in sorted(regions)])
+            else:
+                state, ids = validated_state(wire(regions))
             rows = region_roots(state)
             require(ids == current["ids"] and totals(rows)[1] == current["resources"]
                     and candidate == world_root(tick, rows), "inconsistent global cut")
             cut = self.cut(current["world"], tick, candidate, current["players"])
             receipt_hash = hashlib.sha256(canonical(sorted(receipts, key=lambda r: r["body"]["session"]))).hexdigest()
             with self.phase("independent_candidate_validation"):
-                self._record_candidate(current, state, candidate, cut)
+                self._record_candidate(current, dict(state), candidate, cut)
             with self.phase("checkpoint_serialization"):
                 encoded_state = canonical(wire(state))
             with self.phase("canonical_journal_write"):
@@ -385,6 +413,11 @@ class Authority:
                                 (current["generation"], tick, candidate, cut, encoded_state))
             if before_commit:
                 before_commit()  # isolated crash injection only
+        # Only after a successful durable COMMIT. The next read still
+        # fetches the exact SQLite BLOB and rechecks all ledger metadata.
+        # Reuse only the immutable locally validated candidate and roots.
+        if self.reuse_validated_candidate:
+            self._remember_state(encoded_state, state, ids, rows)
         return {"generation": current["generation"], "tick": tick, "runtime_root": candidate,
                 "cut_root": cut, "receipt_hash": receipt_hash}
 

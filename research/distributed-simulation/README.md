@@ -98,6 +98,14 @@ durable ticks and 4,138 client receipts. Peak observed throughput
 20 TPS, but zero strict deadline-qualified runs; heavy local results
 regressed against the cached individual baseline.
 
+[Candidate reuse follow-up](SCALE_CANDIDATE_REPORT.md): single-pass
+authenticated region validation, exact post-commit cache reuse, and
+boundary-only transaction observation. The 24-run matrix verifies
+2,834 durable ticks and 5,668 client receipts, including five fully
+deadline-qualified local runs. The separate paired SQLite cost
+experiment verifies the candidate/trace effect. Heavy, WAN, physical
+and actual Minecraft qualification remain open.
+
 ## Ownerless permission lab (#65, 2026-11-26)
 
 The [permission RFC](../../docs/rfcs/ownerless-permissions.md) and retained

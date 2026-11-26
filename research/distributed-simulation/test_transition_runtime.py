@@ -199,11 +199,14 @@ die()
         from scale_profile import PhaseClock
         runtime = DurableRuntime(self.a, channels())
         clock = PhaseClock()
+        boundary = PhaseClock()
         self.a.db.set_trace_callback(clock.trace)
+        self.a.transaction_event = boundary.boundary
         try:
             for batched, keys in ((False, ("b","c")), (True, ("d","e"))):
                 inputs = [(p,self.request(k)) for p,k in enumerate(keys)]
                 clock.begin()
+                boundary.begin()
                 if batched:
                     runtime.advance(inputs=inputs)
                     self.a.committed_receipts(inputs)
@@ -214,11 +217,14 @@ die()
                     for p,q in inputs:
                         self.a.submit(p,q)
                 clock.finish(1)
+                boundary.finish(1)
                 expected = {"write":2,"read":2,"commit":4,"rollback":0} if batched else {
                     "write":6,"read":1,"commit":7,"rollback":0}
                 self.assertEqual(clock.transactions, expected)
+                self.assertEqual(boundary.transactions, expected)
         finally:
             self.a.db.set_trace_callback(None)
+            self.a.transaction_event = None
 
     def test_receipt_lookup_refuses_uncommitted_and_corrupt_batch(self):
         inputs = [(0, self.request("b")), (1, self.request("c"))]

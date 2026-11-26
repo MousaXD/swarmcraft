@@ -32,11 +32,16 @@ class PhaseClock:
 
     def trace(self, statement):
         """Count transaction boundaries only; never retain statement payloads."""
+        kind = {"BEGIN IMMEDIATE": "write", "BEGIN": "read",
+                "COMMIT": "commit", "ROLLBACK": "rollback"}.get(statement)
+        if kind is not None:
+            self.boundary(kind)
+
+    def boundary(self, kind):
+        """Observe completed SQL boundaries without expanding SQL BLOBs."""
         if self.values is not None:
-            kind = {"BEGIN IMMEDIATE": "write", "BEGIN": "read",
-                    "COMMIT": "commit", "ROLLBACK": "rollback"}.get(statement)
-            if kind is not None:
-                self.transactions[kind] += 1
+            require(kind in self.transactions, "unknown transaction boundary")
+            self.transactions[kind] += 1
 
     @contextmanager
     def phase(self, name):
