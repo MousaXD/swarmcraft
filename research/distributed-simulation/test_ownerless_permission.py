@@ -66,6 +66,35 @@ class OwnerlessTests(unittest.TestCase):
             with self.assertRaises(Rejected):
                 authority_for(BINDING[:-1]+"c")(path)
 
+    def test_fused_exchange_preserves_policy_binding_and_rejects_missing_mac(self):
+        for corrupt in (False, True):
+            with self.subTest(corrupt=corrupt), tempfile.TemporaryDirectory() as tmp:
+                path=Path(tmp)/"ledger"
+                Ledger=authority_for(BINDING)
+                ledger=Ledger.create(path,"a"*64,fixture(),[0,1,2],GROUPS)
+                try:
+                    channels=[MemoryChannel(),MemoryChannel()]
+                    for c in channels:
+                        c.worker=PolicyWorker(BINDING)
+                    runtime=FencedRuntime(ledger,[PolicyChannel(c,BINDING) for c in channels])
+                    before=ledger.save()
+                    def strip(reply):
+                        if reply.get("op")=="committed_snapshot":
+                            self.assertEqual(reply["snapshot"]["binding"],BINDING)
+                            reply["snapshot"].pop("policy_mac")
+                        return reply
+                    if corrupt:
+                        channels[0].mutate=strip
+                        with self.assertRaises(Rejected):
+                            runtime.advance()
+                        self.assertEqual(ledger.save(),before)
+                        self.assertTrue(runtime.frozen)
+                    else:
+                        self.assertEqual(runtime.advance()["tick"],1)
+                        self.assertEqual(ledger.save()["tick"],1)
+                finally:
+                    ledger.close()
+
 
 if __name__=="__main__":
     unittest.main()

@@ -249,7 +249,7 @@ class Peers:
             row["output"].close()
 
 
-def run_case(scope,cpus,scenario,repeat,count,state_cache,input_mode,candidate_mode,transaction_counts):
+def run_case(scope,cpus,scenario,repeat,count,state_cache,input_mode,candidate_mode,transaction_counts,worker_exchange):
     label,shape,agents,delay=scenario
     offers=[Offer(s,1,CAP_MIB,CPU_MILLICORES) for s in range(count)]
     groups=[[r for r in range(REGIONS) if r*count//REGIONS==s] for s in range(count)]
@@ -267,13 +267,14 @@ def run_case(scope,cpus,scenario,repeat,count,state_cache,input_mode,candidate_m
         try:
             with FixedCappedLab(scope,offers,{s:delay for s in range(count)},cpus) as lab:
                 ping=lab.ping()
-                runtime=DurableRuntime(ledger,lab.channels)
+                runtime=DurableRuntime(ledger,lab.channels,worker_exchange=worker_exchange)
                 control=runtime.runtime.coordinator
                 before_stats=control.stats()
                 before_net=lab.net_stats()
                 before_kernel=[lab.observe(i) for i in range(count)]
                 scope.recheck(before_kernel)
                 before_frames=[(c.sent,c.received) for c in lab.channels]
+                before_sequences=[(c.tx_seq,c.rx_seq) for c in lab.channels]
                 def guard():
                     scope.recheck([lab.observe(i) for i in range(count)])
                 with Peers(ledger,tmp,input_mode) as peers:
@@ -290,6 +291,7 @@ def run_case(scope,cpus,scenario,repeat,count,state_cache,input_mode,candidate_m
                         begin=time.monotonic_ns()-start
                         if begin>=WINDOW_NS:
                             break
+                        sequences=[(c.tx_seq,c.rx_seq) for c in lab.channels]
                         profile.begin()
                         with ledger.phase("resource_guard"):
                             guard()
@@ -298,11 +300,14 @@ def run_case(scope,cpus,scenario,repeat,count,state_cache,input_mode,candidate_m
                         rows.append({"tick":tick,"scheduled_ns":target,"begin_ns":begin,"finish_ns":finish,
                                      "root":accepted["runtime_root"],"cut_root":accepted["cut_root"],
                                      "phase_ns":profile.finish(finish-begin),
-                                     "transactions":profile.transactions})
+                                     "transactions":profile.transactions,
+                                     "worker_messages":[[c.tx_seq-a,c.rx_seq-b]
+                                                        for c,(a,b) in zip(lab.channels,sequences)]})
                     cpu_ns=time.process_time_ns()-cpu_start
                     require(rows,"no accepted ticks")
                     clients=peers.stop()
                 after_frames=[(c.sent,c.received) for c in lab.channels]
+                after_sequences=[(c.tx_seq,c.rx_seq) for c in lab.channels]
                 after_kernel=[lab.observe(i) for i in range(count)]
                 scope.recheck(after_kernel)
                 after_stats=control.stats()
@@ -319,6 +324,8 @@ def run_case(scope,cpus,scenario,repeat,count,state_cache,input_mode,candidate_m
                         "stats_before":before_stats,"stats_after":after_stats,
                         "net_before":before_net,"net_after":after_net,
                         "worker_frame_bytes":[[b[0]-a[0],b[1]-a[1]] for a,b in zip(before_frames,after_frames)],
+                        "worker_frame_counts":[[b[0]-a[0],b[1]-a[1]]
+                                               for a,b in zip(before_sequences,after_sequences)],
                         "coordinator_cpu_ns":cpu_ns,"ticks":rows,"summary":summarize(rows),
                         "clients":clients,"final":saved,"journal":journal}
             require(not scope.active and not scope.poisoned and all(not leaf.exists() for leaf in lab.leaves)
@@ -342,7 +349,7 @@ def run(report):
             # Alternate order to reduce systematic warm/cache/host-load bias.
             for count in ((1,2) if repeat%2 else (2,1)):
                 result=run_case(scope,cpus,scenario,repeat,count,report["state_cache"],report["input_mode"],
-                                report["candidate_mode"],report["transaction_counts"])
+                                report["candidate_mode"],report["transaction_counts"],report["worker_exchange"])
                 report["runs"].append(result)
                 s=result["summary"]
                 print(f"{scenario[0]} rep={repeat} workers={count}: {s['within_window']}/{s['target_ticks']} "
@@ -359,15 +366,17 @@ def main():
     parser.add_argument("--input-mode",choices=("batched","individual"),default="batched")
     parser.add_argument("--candidate-mode",choices=("reuse","reparse"),default="reuse")
     parser.add_argument("--transaction-counts",choices=("boundary","trace"),default="boundary")
+    parser.add_argument("--worker-exchange",choices=("fused","separate"),default="fused")
     args=parser.parse_args()
     if args.client:
         client_main()
         return
     require(args.output is not None and not args.output.exists(),"new receipt path required")
     os.umask(0o077)
-    report={"schema":4,"classification":CLASSIFICATION,"completed":False,
+    report={"schema":5,"classification":CLASSIFICATION,"completed":False,
             "state_cache":args.state_cache,"input_mode":args.input_mode,
             "candidate_mode":args.candidate_mode,"transaction_counts":args.transaction_counts,
+            "worker_exchange":args.worker_exchange,
             "period_ns":PERIOD_NS,"window_ns":WINDOW_NS,"repeats":REPEATS,"runs":[]}
     with args.output.open("x") as out:
         try:

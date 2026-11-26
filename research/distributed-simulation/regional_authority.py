@@ -110,6 +110,14 @@ class FencedWorker:
             regions = [read_region(row) for row in sequence(request.get("regions"), maximum=REGIONS)]
             require([r.rid for r in regions] == grant["regions"] and
                     request.get("tick", 0) == grant["base_tick"], "init outside grant")
+        if op == "commit_snapshot":
+            fields(request, "op", "tick", "root", "receipt")
+            # Use the same local seal-bound commit and receipt generation.
+            # Dynamic dispatch preserves additional receipt policy bindings
+            # (e.g. PolicyWorker); there is no weaker signing path.
+            ack = self.handle({**request, "op": "commit"})
+            return {**ack, "op": "committed_snapshot",
+                    "snapshot": self.handle({"op": "fenced_snapshot"})}
         if op == "fenced_snapshot":
             fields(request, "op")
             require(self.worker.phase == "idle" and self.parent_root is not None,
@@ -453,8 +461,10 @@ class FencedRuntime:
     ledger alone returns a canonical accepted cut; a failed commit poisons
     this adapter and its worker coordinator. Never restart with old grants.
     """
-    def __init__(self, authority, channels):
+    def __init__(self, authority, channels, *, worker_exchange="fused"):
+        require(worker_exchange in ("fused", "separate"), "unknown worker exchange")
         self.authority = authority
+        self.worker_exchange = worker_exchange
         current = authority.read()
         # Even a crash before tick one consumes the generation.
         current = authority.claim(current["generation"], current["tick"], current["runtime_root"])
@@ -476,11 +486,20 @@ class FencedRuntime:
                     (current["tick"], current["runtime_root"]) ==
                     (self.coordinator.tick, self.coordinator.root), "runtime grant or cut retired")
             with self.authority.phase("worker_tick"):
-                candidate = self.coordinator.step(fault, controls=controls)
-            with self.authority.phase("worker_receipts"):
-                receipts = candidate_receipts(self.coordinator)
-            require(all((r["body"]["tick"], r["body"]["runtime_root"]) ==
-                        (candidate["tick"], candidate["root"]) for r in receipts),
+                candidate = self.coordinator.step(fault, controls=controls,
+                                                  commit_snapshot=self.worker_exchange == "fused",
+                                                  receipt_phase=self.authority.phase)
+            if self.worker_exchange == "fused":
+                receipts = candidate["receipts"]
+            else:
+                with self.authority.phase("worker_receipts"):
+                    receipts = candidate_receipts(self.coordinator)
+            require(len(receipts) == len(self.session_ids) and all(
+                        isinstance(r, dict) and isinstance(r.get("body"), dict)
+                        and integer(r["body"].get("tick"), candidate["tick"], candidate["tick"])
+                        and r["body"].get("runtime_root") == candidate["root"]
+                        and r["body"].get("session") == session
+                        for r, session in zip(receipts, self.session_ids)),
                     "worker snapshots differ from staged candidate")
             if before_publish is not None:
                 with self.authority.phase("resource_guard"):

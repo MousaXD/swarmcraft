@@ -333,8 +333,8 @@ class AuthorityTests(unittest.TestCase):
         runtime = FencedRuntime(self.ledger, channels)
         before = self.ledger.save()
         def mutate(reply):
-            if "body" in reply:
-                reply["body"]["runtime_root"] = "0" * 64
+            if reply.get("op") == "committed_snapshot":
+                reply["snapshot"]["body"]["runtime_root"] = "0" * 64
             return reply
         channels[0].mutate = mutate
         with self.assertRaisesRegex(Rejected, "staged candidate"):
@@ -343,6 +343,115 @@ class AuthorityTests(unittest.TestCase):
         self.assertEqual(self.ledger.save(), before)
         with self.assertRaises(Rejected):
             runtime.advance()
+
+    def test_fused_receipt_matches_separate_snapshot_and_reduces_rounds(self):
+        class RecordingChannel(MemoryChannel):
+            def __init__(self):
+                super().__init__()
+                self.worker = FencedWorker()
+                self.requests = []
+
+            def send(self, request, deadline):
+                self.requests.append(request["op"])
+                super().send(request, deadline)
+
+        for mode in ("separate", "fused"):
+            current = self.ledger.read()
+            if current["claimed"]:
+                self.ledger.rotate(current["generation"], current["tick"], current["runtime_root"], GROUPS)
+                current = self.ledger.read()
+            channels = [RecordingChannel(), RecordingChannel()]
+            runtime = FencedRuntime(self.ledger, channels, worker_exchange=mode)
+            for c in channels:
+                c.requests.clear()
+            with patch.object(self.ledger, "commit", wraps=self.ledger.commit) as commit:
+                result = runtime.advance()
+                receipts = commit.call_args.args[0]
+            expected = ["prepare", "seal"] + (["commit_snapshot"] if mode == "fused" else ["commit", "fenced_snapshot"])
+            self.assertTrue(all(c.requests == expected for c in channels))
+            # The new wire envelope does not change the exact signed
+            # receipt or canonical durable receipt hash.
+            self.assertEqual(receipts, candidate_receipts(runtime.coordinator))
+            self.assertEqual(result["receipt_hash"], hashlib.sha256(canonical(sorted(
+                receipts, key=lambda r:r["body"]["session"]))).hexdigest())
+            self.assertEqual(self.ledger.read()["state"], serial_step(current["state"], current["tick"]+1))
+
+    def test_fused_invalid_ack_or_receipt_fences_without_publication(self):
+        for mutate in (
+            lambda r:r.update(root="0"*64),
+            lambda r:r.update(tick=True),
+            lambda r:r.pop("snapshot"),
+            lambda r:r["snapshot"]["body"].update(session="0"*64),
+            lambda r:r["snapshot"].update(mac="0"*64),
+            lambda r:r["snapshot"]["body"].update(parent_root="0"*64),
+        ):
+            with self.subTest(mutate=mutate):
+                current = self.ledger.read()
+                if current["claimed"]:
+                    self.ledger.rotate(current["generation"], current["tick"], current["runtime_root"], GROUPS)
+                channels = [MemoryChannel(), MemoryChannel()]
+                for c in channels:
+                    c.worker = FencedWorker()
+                runtime = FencedRuntime(self.ledger, channels)
+                before = self.ledger.save()
+                history = self.ledger.history()
+                def corrupt(reply):
+                    if reply.get("op") == "committed_snapshot":
+                        mutate(reply)
+                    return reply
+                channels[0].mutate = corrupt
+                with self.assertRaises(Rejected):
+                    runtime.advance()
+                self.assertTrue(runtime.frozen and runtime.coordinator.poisoned)
+                self.assertEqual(self.ledger.save(), before)
+                self.assertEqual(self.ledger.history(), history)
+                self.assertEqual([c.worker.worker.tick for c in channels], [1,1])
+
+    def test_lost_fused_reply_never_retries_or_publishes_and_requires_new_grants(self):
+        class LostReply(MemoryChannel):
+            def recv(self, deadline):
+                reply = super().recv(deadline)
+                if reply.get("op") == "committed_snapshot":
+                    raise EOFError("lost committed snapshot")
+                return reply
+
+        channels = [MemoryChannel(), LostReply()]
+        for c in channels:
+            c.worker = FencedWorker()
+        runtime = FencedRuntime(self.ledger, channels)
+        before = self.ledger.save()
+        history = self.ledger.history()
+        with self.assertRaises(EOFError):
+            runtime.advance()
+        self.assertTrue(runtime.frozen and runtime.coordinator.poisoned)
+        self.assertEqual(self.ledger.save(), before)
+        self.assertEqual(self.ledger.history(), history)
+        self.assertEqual([c.worker.worker.tick for c in channels], [1,1])
+        with self.assertRaises(Rejected):
+            runtime.advance()
+        with self.assertRaises(Rejected):
+            FencedRuntime(self.ledger, [])
+        self.rotate()
+        fresh = [MemoryChannel(), MemoryChannel()]
+        for c in fresh:
+            c.worker = FencedWorker()
+        restarted = FencedRuntime(self.ledger, fresh)
+        self.assertEqual(restarted.advance()["tick"], 1)
+        self.assertEqual(self.ledger.read()["state"], serial_step(fixture(), 1))
+
+    def test_fused_worker_cannot_commit_without_exact_seal(self):
+        worker = FencedWorker()
+        current = self.ledger.read()
+        grant = current["grants"][0]
+        worker.handle({"op":"bind_grant","grant":grant})
+        worker.handle({"op":"init","version":1,
+                       "regions":[current["state"][r].wire() for r in grant["regions"]]})
+        request = {"op":"commit_snapshot","tick":1,"root":"a"*64,"receipt":"b"*64}
+        with self.assertRaises(Rejected):
+            worker.handle(request)
+        self.assertEqual(worker.worker.tick, 0)
+        self.assertEqual(worker.worker.phase, "idle")
+        self.assertIsNone(worker.parent_root)
 
     def test_one_time_claim_even_before_first_tick(self):
         s = self.ledger.save()

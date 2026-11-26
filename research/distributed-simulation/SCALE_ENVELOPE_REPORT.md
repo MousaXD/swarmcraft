@@ -163,7 +163,7 @@ systemd-run --user --scope --quiet \
   unshare --user --map-root-user --net \
   python3 research/distributed-simulation/scale_lab.py \
   --state-cache uncached --input-mode individual --candidate-mode reparse \
-  --transaction-counts trace --output /tmp/new-sc63.json
+  --transaction-counts trace --worker-exchange separate --output /tmp/new-sc63.json
 cd research/distributed-simulation
 python3 verify_scale_evidence.py /tmp/new-sc63.json
 python3 -m unittest discover -s . -p 'test_*.py' -v

@@ -39,7 +39,7 @@ def expected_stats(ns):
             "unpaced_service_ticks_per_second":len(samples)*1000/sum(samples)}
 
 
-def verify_timing(row,profile=False,input_mode=None):
+def verify_timing(row,profile=False,input_mode=None,worker_exchange=None):
     ticks=row["ticks"]
     target=WINDOW_NS//PERIOD_NS
     require(1<=len(ticks)<=target,"invalid tick sample count")
@@ -48,7 +48,8 @@ def verify_timing(row,profile=False,input_mode=None):
     for t,r in enumerate(ticks,1):
         fields(r,"tick","scheduled_ns","begin_ns","finish_ns","root","cut_root",
                *("phase_ns",) if profile else (),
-               *("transactions",) if input_mode is not None else ())
+               *("transactions",) if input_mode is not None else (),
+               *("worker_messages",) if worker_exchange is not None else ())
         scheduled=(t-1)*PERIOD_NS
         require(r["tick"]==t and r["scheduled_ns"]==scheduled
                 and integer(r["begin_ns"],max(last,scheduled),WINDOW_NS-1)
@@ -72,6 +73,15 @@ def verify_timing(row,profile=False,input_mode=None):
                     and all(type(v) is int for v in counts.values())
                     and tuple(counts[k] for k in ("write","read","commit","rollback"))==expected,
                     "unexpected transaction boundaries")
+        if worker_exchange is not None:
+            rounds=3 if worker_exchange=="fused" else 4
+            messages=r["worker_messages"]
+            require(worker_exchange in ("fused","separate")
+                    and integer(row.get("workers"),1,2)
+                    and isinstance(messages,list) and len(messages)==row["workers"]
+                    and all(isinstance(pair,list) and len(pair)==2
+                            and all(integer(n,rounds,rounds) for n in pair) for pair in messages),
+                    "unexpected authenticated worker exchange count")
         service.append(last-r["begin_ns"])
         latency.append(last-scheduled)
     # Stopping early is permissible only if the fixed observation window
@@ -90,7 +100,7 @@ def verify_timing(row,profile=False,input_mode=None):
     require(integer(row["coordinator_cpu_ns"],1,last),"invalid coordinator CPU time")
 
 
-def verify_run(row,scenario,repeat,count,hardware,states,roots,profile=False,input_mode=None):
+def verify_run(row,scenario,repeat,count,hardware,states,roots,profile=False,input_mode=None,worker_exchange=None):
     label,shape,agents,delay=scenario
     require((row["scenario"],row["shape"],row["agents"],row["delay_ms"],row["repeat"],row["workers"])==
             (label,shape,agents,delay,repeat,count),"wrong scenario/order")
@@ -138,7 +148,15 @@ def verify_run(row,scenario,repeat,count,hardware,states,roots,profile=False,inp
                         "kernel network impairment not exercised")
             else:
                 require(not a and not b,"unexpected network impairment")
-    verify_timing(row,profile,input_mode)
+    verify_timing(row,profile,input_mode,worker_exchange)
+    if worker_exchange is not None:
+        counts=row.get("worker_frame_counts")
+        require(isinstance(counts,list) and len(counts)==count
+                and all(isinstance(pair,list) and len(pair)==2
+                        and all(integer(n,1,640) for n in pair) for pair in counts)
+                and counts==[[sum(t["worker_messages"][s][d] for t in row["ticks"])
+                              for d in range(2)] for s in range(count)],
+                "worker frame totals do not reconcile")
     n=len(row["ticks"])
     saved=row["final"]
     world=saved["world"]
@@ -194,18 +212,21 @@ def verify_run(row,scenario,repeat,count,hardware,states,roots,profile=False,inp
 
 def verify(data):
     require(isinstance(data,dict),"invalid benchmark receipt")
-    profile=data.get("schema") in (2,3,4)
-    batched_schema=data.get("schema") in (3,4)
-    candidate_schema=data.get("schema")==4
+    profile=data.get("schema") in (2,3,4,5)
+    batched_schema=data.get("schema") in (3,4,5)
+    candidate_schema=data.get("schema") in (4,5)
+    exchange_schema=data.get("schema")==5
     fields(data,"schema","classification","completed","period_ns","window_ns","repeats","hardware","runs",
            *("state_cache",) if profile else (),
            *("input_mode",) if batched_schema else (),
-           *("candidate_mode","transaction_counts") if candidate_schema else ())
-    require(type(data["schema"]) is int and data["schema"] in (1,2,3,4)
+           *("candidate_mode","transaction_counts") if candidate_schema else (),
+           *("worker_exchange",) if exchange_schema else ())
+    require(type(data["schema"]) is int and data["schema"] in (1,2,3,4,5)
             and (not profile or data["state_cache"] in ("cached","uncached"))
             and (not batched_schema or data["input_mode"] in ("batched","individual"))
             and (not candidate_schema or (data["candidate_mode"] in ("reuse","reparse")
                  and data["transaction_counts"] in ("boundary","trace")))
+            and (not exchange_schema or data["worker_exchange"] in ("fused","separate"))
             and data["classification"]==CLASSIFICATION and data["completed"] is True
             and data["period_ns"]==PERIOD_NS and data["window_ns"]==WINDOW_NS and data["repeats"]==REPEATS,
             "incomplete or misclassified benchmark")
@@ -227,7 +248,8 @@ def verify(data):
             states.append(serial_step(states[-1],t,controls={p:(d,d) for p in PLAYERS}))
         roots=[world_root(t,region_roots(state)) for t,state in enumerate(states)]
         for row,rep,count in pairs:
-            world=verify_run(row,scenario,rep,count,hw,states,roots,profile,data.get("input_mode"))
+            world=verify_run(row,scenario,rep,count,hw,states,roots,profile,data.get("input_mode"),
+                             data.get("worker_exchange"))
             require(world not in seen_worlds,"comparison reused authority identity")
             seen_worlds.add(world)
     result=aggregate(data)
@@ -241,6 +263,10 @@ def verify(data):
     if candidate_schema:
         result["candidate_mode"]=data["candidate_mode"]
         result["transaction_counts"]=data["transaction_counts"]
+    if exchange_schema:
+        result["worker_exchange"]=data["worker_exchange"]
+        result["worker_frames"]=[sum(pair[d] for r in data["runs"] for pair in r["worker_frame_counts"])
+                                 for d in range(2)]
     return result
 
 

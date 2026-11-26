@@ -300,10 +300,10 @@ class TransitionAuthority(Authority):
 
 
 class DurableRuntime:
-    def __init__(self, authority, channels):
+    def __init__(self, authority, channels, *, worker_exchange="fused"):
         require(isinstance(authority, TransitionAuthority), "transition authority required")
         self.authority = authority
-        self.runtime = FencedRuntime(authority, channels)
+        self.runtime = FencedRuntime(authority, channels, worker_exchange=worker_exchange)
 
     def seal(self, *, inputs=None):
         require(not self.runtime.frozen, "fenced runtime frozen")

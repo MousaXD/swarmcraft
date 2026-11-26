@@ -118,6 +118,19 @@ class TimingTests(unittest.TestCase):
         clock.trace("BEGIN")
         self.assertEqual(clock.transactions,{"write":1,"read":1,"commit":2,"rollback":0})
 
+    def test_worker_round_trip_evidence(self):
+        for mode,rounds in (("fused",3),("separate",4)):
+            rows=self.timed_rows(5_000_000)
+            for row in rows:
+                row["worker_messages"]=[[rounds,rounds],[rounds,rounds]]
+            evidence={"ticks":rows,"summary":summarize(rows),"coordinator_cpu_ns":1,"workers":2}
+            verify_timing(evidence,worker_exchange=mode)
+            for invalid in ([[rounds,rounds]], [[rounds,rounds],[rounds,rounds+1]],
+                            [[True,rounds],[rounds,rounds]], [[rounds,rounds]]*3):
+                rows[0]["worker_messages"]=invalid
+                with self.assertRaises(Rejected):
+                    verify_timing(evidence,worker_exchange=mode)
+
 
 class RetainedEvidenceTests(unittest.TestCase):
     @classmethod
@@ -197,6 +210,29 @@ class RetainedEvidenceTests(unittest.TestCase):
         for field,value in (("candidate_mode","unknown"),("transaction_counts","unknown")):
             with self.assertRaises(Rejected):
                 verify({**report,field:value})
+
+    def test_fused_worker_exchange_matrix(self):
+        path=Path(__file__).parent/"evidence"/"2026-11-26-scale-fused.json"
+        report=json.loads(path.read_text())
+        result=verify(report)
+        self.assertEqual(result["worker_exchange"],"fused")
+        self.assertEqual(result["runs"],24)
+        self.assertEqual(result["accepted_ticks"],2185)
+        self.assertEqual(result["within_window_ticks"],2162)
+        self.assertEqual(result["client_commands"],4370)
+        self.assertEqual(result["qualified_runs"],0)
+        self.assertEqual(result["worker_frames"],[9711,9711])
+        self.assertEqual(result["transactions"],{"write":4370,"read":4370,"commit":8740,"rollback":0})
+        for value in ("unknown","separate"):
+            with self.assertRaises(Rejected):
+                verify({**report,"worker_exchange":value})
+        for field in ("worker_messages","worker_frame_counts"):
+            bad=copy.deepcopy(report)
+            row=bad["runs"][0]
+            target=row["ticks"][0] if field=="worker_messages" else row
+            target[field][0][0]+=1
+            with self.assertRaises(Rejected):
+                verify(bad)
 
 
 if __name__=="__main__":

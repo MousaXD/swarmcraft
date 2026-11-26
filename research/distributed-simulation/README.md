@@ -106,6 +106,15 @@ deadline-qualified local runs. The separate paired SQLite cost
 experiment verifies the candidate/trace effect. Heavy, WAN, physical
 and actual Minecraft qualification remain open.
 
+[Fused worker exchange follow-up](SCALE_EXCHANGE_REPORT.md): one
+fewer sequential authenticated worker round trip per tick, exact
+receipt preservation and real subprocess lost-reply recovery tests.
+Full 24-run replay verified 2,185 durable ticks and 4,370 receipts;
+19,422 application frames reconcile. WAN throughput improved against
+the historical separate path, but local/near cases regressed during
+elevated host load, and zero runs met every deadline. The full
+service and physical/actual Minecraft gates remain open.
+
 ## Ownerless permission lab (#65, 2026-11-26)
 
 The [permission RFC](../../docs/rfcs/ownerless-permissions.md) and retained

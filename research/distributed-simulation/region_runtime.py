@@ -6,6 +6,7 @@ accepts a tick only after all staged work and acknowledgments arrive.
 """
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 import hashlib
 import hmac
@@ -532,7 +533,7 @@ class Coordinator:
             channel.send(request, deadline)
         return [channel.recv(deadline) for channel in self.channels]
 
-    def step(self, fault=None, *, controls=None):
+    def step(self, fault=None, *, controls=None, commit_snapshot=False, receipt_phase=nullcontext):
         require(not self.poisoned and self.tick < MAX_TICK, "run frozen")
         start = time.monotonic_ns()
         deadline = time.monotonic() + self.timeout
@@ -594,17 +595,36 @@ class Coordinator:
             root = world_root(tick, list(summaries.values()))
             if fault:
                 fault("sealed")
-            replies = self.exchange([{"op": "commit", "tick": tick, "root": root, "receipt": reply["receipt"]}
-                                     for reply in sealed], deadline)
-            require(all(reply == {"op": "committed", "tick": tick, "root": root} for reply in replies),
-                    "missing commit acknowledgment")
+            requests = [{"op": "commit_snapshot" if commit_snapshot else "commit",
+                         "tick": tick, "root": root, "receipt": reply["receipt"]} for reply in sealed]
+            snapshots = []
+            if commit_snapshot:
+                # One authenticated exchange still requires every sealed
+                # worker's exact commit acknowledgment AND full receipt.
+                # Only the fenced adapter enables this operation.
+                with receipt_phase("worker_receipts"):
+                    replies = self.exchange(requests, deadline)
+                    for reply in replies:
+                        fields(reply, "op", "tick", "root", "snapshot")
+                        require(reply["op"] == "committed_snapshot"
+                                and integer(reply["tick"], tick, tick) and reply["root"] == root,
+                                "missing commit acknowledgment")
+                        require(isinstance(reply["snapshot"], dict), "missing committed snapshot")
+                        snapshots.append(reply["snapshot"])
+            else:
+                replies = self.exchange(requests, deadline)
+                require(all(reply == {"op": "committed", "tick": tick, "root": root} for reply in replies),
+                        "missing commit acknowledgment")
             # This is the ONLY accepted cut. Some workers might have a
             # tentative next state if a commit delivery/ack fails. Such a
             # run is unusable, and no further tick can be accepted.
             self.tick, self.root, self.summaries = tick, root, summaries
-            return {"tick": tick, "root": root, "elapsed_ms": (time.monotonic_ns() - start) / 1e6,
-                    "cross_worker_agents": transfers, "cross_worker_resources": resources,
-                    "region_agents": local_agents + transfers, "region_resources": local_resources + resources}
+            result = {"tick": tick, "root": root, "elapsed_ms": (time.monotonic_ns() - start) / 1e6,
+                      "cross_worker_agents": transfers, "cross_worker_resources": resources,
+                      "region_agents": local_agents + transfers, "region_resources": local_resources + resources}
+            if commit_snapshot:
+                result["receipts"] = snapshots
+            return result
         except BaseException:
             self.poisoned = True
             raise
